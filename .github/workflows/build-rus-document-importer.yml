@@ -1,0 +1,53 @@
+name: Build Russian Document Importer Windows EXE
+
+on:
+  push:
+    branches:
+      - build/rus-document-importer-20261027
+  workflow_dispatch:
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            rus-document-importer
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust unit and ZIP integration tests
+        working-directory: rus-document-importer
+        run: cargo test --release
+      - name: Build EXE for Windows x64
+        working-directory: rus-document-importer
+        run: cargo build --release
+      - name: Windows end-to-end smoke test
+        shell: pwsh
+        run: |
+          $bin = (Resolve-Path 'rus-document-importer/target/release/rus_document_importer.exe').Path
+          $dir = Join-Path $env:RUNNER_TEMP 'rus-importer-smoke'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          Copy-Item $bin (Join-Path $dir 'RusDocumentImporter.exe')
+          [IO.File]::WriteAllText((Join-Path $dir 'Положение об аттестации.pdf'), 'sample')
+          Push-Location $dir
+          try {
+            & '.\RusDocumentImporter.exe'
+            if (!(Test-Path 'Готовые/Polozhenie-ob-attestatsii.pdf')) { throw 'Missing transliterated PDF' }
+            if (!(Test-Path 'Готовые/component_import.csv')) { throw 'Missing CSV' }
+            if (!(Test-Path 'Готовые.zip')) { throw 'Missing upload ZIP' }
+            $csv = [IO.File]::ReadAllText((Join-Path $dir 'Готовые/component_import.csv'))
+            if (!$csv.Contains('Положение об аттестации')) { throw 'Missing original Russian name in CSV' }
+            if (!$csv.Contains('Polozhenie-ob-attestatsii.pdf')) { throw 'Missing target name in CSV' }
+            $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $dir 'Готовые.zip'))
+            try {
+              $names = @($zip.Entries | ForEach-Object { $_.FullName })
+              if ('component_import.csv' -notin $names -or 'Polozhenie-ob-attestatsii.pdf' -notin $names) { throw 'Missing entries in ZIP' }
+            } finally { $zip.Dispose() }
+          } finally { Pop-Location }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RusDocumentImporter-Windows-x64
+          path: rus-document-importer/target/release/rus_document_importer.exe
+          if-no-files-found: error
