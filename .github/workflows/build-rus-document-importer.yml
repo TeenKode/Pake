@@ -37,7 +37,10 @@ jobs:
             if (!(Test-Path 'Готовые/Polozhenie-ob-attestatsii.pdf')) { throw 'Missing transliterated PDF' }
             if (!(Test-Path 'Готовые/component_import.csv')) { throw 'Missing CSV' }
             if (!(Test-Path 'Готовые.zip')) { throw 'Missing upload ZIP' }
-            $csv = [IO.File]::ReadAllText((Join-Path $dir 'Готовые/component_import.csv'))
+            $csvBytes = [IO.File]::ReadAllBytes((Join-Path $dir 'Готовые/component_import.csv'))
+            if ($csvBytes.Length -ge 3 -and $csvBytes[0] -eq 0xEF -and $csvBytes[1] -eq 0xBB -and $csvBytes[2] -eq 0xBF) { throw 'CSV must not contain UTF-8 BOM' }
+            $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+            $csv = $strictUtf8.GetString($csvBytes)
             if (!$csv.Contains('Положение об аттестации')) { throw 'Missing original Russian name in CSV' }
             if (!$csv.Contains('Polozhenie-ob-attestatsii.pdf')) { throw 'Missing target name in CSV' }
             $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $dir 'Готовые.zip'))
