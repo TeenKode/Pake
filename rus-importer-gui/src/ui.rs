@@ -13,7 +13,7 @@ const GREEN: Color32 = Color32::from_rgb(17, 132, 99);
 const SOFT_GREEN: Color32 = Color32::from_rgb(225, 247, 238);
 const BAD: Color32 = Color32::from_rgb(185, 55, 70);
 
-const SIMPLE_COLS: [usize; 6] = [0, 3, 5, 2, 1, 4];
+const SIMPLE_COLS: [usize; 5] = [0, 3, 5, 2, 1];
 const TABS: [&str; 3] = ["Основное", "Описание и даты", "Подпись"];
 
 fn apply_theme(ctx: &egui::Context, dark: bool) {
@@ -469,6 +469,15 @@ impl ImporterApp {
                         .desired_width(f32::INFINITY))
                 };
                 if response.changed() { self.dirty = true; }
+                if col == 3 && ui.small_button("Обновить транслит по названию").clicked() {
+                    let ext = self.rows[index].source.extension()
+                        .and_then(|s| s.to_str()).unwrap_or("").to_owned();
+                    let stem = self.rows[index].fields[0].clone();
+                    let name = if ext.is_empty() { stem } else { format!("{stem}.{ext}") };
+                    self.rows[index].fields[3] = transliterate_filename(&name);
+                    self.dirty = true;
+                    self.info("Имя файла обновлено. Проверьте, нет ли совпадений.".to_owned());
+                }
                 if col == 3 && !valid_filename(self.rows[index].fields[3].trim()) {
                     ui.colored_label(BAD, "Некорректное имя. Проверьте символы.");
                 }
