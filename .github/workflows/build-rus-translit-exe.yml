@@ -1,0 +1,34 @@
+name: Build Russian Translit EXE
+
+on:
+  push:
+    branches:
+      - build/rus-translit-win64-20261027
+  workflow_dispatch:
+
+jobs:
+  build-win64:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            rus-translit-build
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        working-directory: rus-translit-build
+        run: cargo test --release
+      - name: Build portable Windows exe
+        working-directory: rus-translit-build
+        run: cargo build --release
+      - name: Verify executable exists
+        shell: pwsh
+        run: |
+          if (!(Test-Path "rus-translit-build/target/release/rus_filename_translit.exe")) { throw "EXE missing" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rus-translit-windows-x64
+          path: rus-translit-build/target/release/rus_filename_translit.exe
+          if-no-files-found: error
