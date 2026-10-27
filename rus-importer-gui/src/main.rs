@@ -566,6 +566,15 @@ impl eframe::App for ImporterApp {
 }
 
 fn main() -> eframe::Result {
+    // Headless integration mode for Windows build validation; normal launches use GUI.
+    let args: Vec<_> = std::env::args_os().collect();
+    if args.len() == 3 && args[1] == "--smoke-test-folder" {
+        let folder = PathBuf::from(&args[2]);
+        let rows = scan(&folder, &std::env::current_exe().unwrap_or_default()).unwrap();
+        if rows.is_empty() { std::process::exit(3); }
+        if export(&folder, &rows).is_err() { std::process::exit(4); }
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1420.0, 850.0])
