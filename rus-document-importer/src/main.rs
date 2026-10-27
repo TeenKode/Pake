@@ -188,7 +188,6 @@ fn quote_csv(value: &str) -> String {
 }
 fn write_csv(destination: &Path, rows: &[(String, String)]) -> io::Result<()> {
     let mut csv = BufWriter::new(File::create(destination)?);
-    csv.write_all(b"\xEF\xBB\xBF")?;
     writeln!(csv, "{}", HEADER)?;
     for (name, file) in rows {
         let fields = [name.as_str(), "", REGULATORY, file.as_str(), "", "", "", "", "", "", "", "", "", ""];
@@ -245,7 +244,9 @@ mod tests {
         fs::write(&exe, b"exe").unwrap();
         run_in(&root, &exe).unwrap();
         let csv = fs::read(root.join("Готовые/component_import.csv")).unwrap();
-        assert!(csv.starts_with(b"\xEF\xBB\xBF"));
+        assert!(csv.starts_with(b"Name;"));
+        assert!(!csv.starts_with(b"\xEF\xBB\xBF"));
+        assert!(std::str::from_utf8(&csv).is_ok());
         let text = String::from_utf8(csv).unwrap();
         assert!(text.contains("\"Приказ о зачислении\";\"\";\"Нет\";\"Prikaz-o-zachislenii.pdf\""));
         assert_eq!(fs::read(root.join("Готовые/Prikaz-o-zachislenii.pdf")).unwrap(), b"a pretend pdf");
