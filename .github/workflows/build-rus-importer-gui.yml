@@ -25,10 +25,10 @@ jobs:
           workspaces: rus-importer-gui
       - name: Run Rust tests
         working-directory: rus-importer-gui
-        run: cargo test --release --locked
+        run: cargo test --release
       - name: Build portable Windows GUI EXE
         working-directory: rus-importer-gui
-        run: cargo build --release --locked
+        run: cargo build --release
       - name: Windows end-to-end CSV and ZIP check
         shell: pwsh
         run: |
