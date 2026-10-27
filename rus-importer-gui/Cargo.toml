@@ -1,0 +1,18 @@
+[package]
+name = "rus_document_importer_gui"
+version = "3.0.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "=0.31.1", default-features = false, features = ["default_fonts", "glow"] }
+rfd = "0.15.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
