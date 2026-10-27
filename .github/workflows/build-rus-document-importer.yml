@@ -33,7 +33,7 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $dir 'Положение об аттестации.pdf'), 'sample')
           Push-Location $dir
           try {
-            & '.\RusDocumentImporter.exe'
+            Start-Process -FilePath (Join-Path $dir 'RusDocumentImporter.exe') -Wait -PassThru | Out-Null
             if (!(Test-Path 'Готовые/Polozhenie-ob-attestatsii.pdf')) { throw 'Missing transliterated PDF' }
             if (!(Test-Path 'Готовые/component_import.csv')) { throw 'Missing CSV' }
             if (!(Test-Path 'Готовые.zip')) { throw 'Missing upload ZIP' }
