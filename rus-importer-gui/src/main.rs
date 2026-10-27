@@ -279,6 +279,7 @@ fn load_project(path: &Path) -> Result<Project, String> {
     Ok(parsed)
 }
 
+#[path = "ui_compact.rs"]
 mod ui;
 
 fn main() -> eframe::Result {
