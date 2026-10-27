@@ -257,6 +257,7 @@ mod tests {
         assert!(archive.by_name("Prikaz-o-zachislenii.pdf").is_ok());
         run_in(&root, &exe).unwrap();
         assert!(root.join("Готовые_2.zip").exists());
+        drop(archive);
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
