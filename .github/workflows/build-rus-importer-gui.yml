@@ -1,4 +1,4 @@
-name: Build Windows GUI RusDocumentImporter v3
+name: RusDocumentImporter Windows x64 build and tests
 
 on:
   push:
@@ -11,6 +11,7 @@ on:
       - build/rus-importer-v5-4-file-only-brackets-20261028
       - build/rus-importer-v6-dynamic-template-20261028
       - build/rus-importer-v6-1-safe-filenames-20261028
+      - release/rus-document-importer-v6-2-20261028
   workflow_dispatch:
 
 jobs:
@@ -24,6 +25,7 @@ jobs:
         with:
           sparse-checkout: |
             rus-importer-gui
+            LICENSE
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust build
@@ -73,9 +75,36 @@ jobs:
         shell: pwsh
         run: |
           if (!(Test-Path 'rus-importer-gui/target/release/rus_document_importer_gui.exe')) { throw 'EXE missing' }
+      - name: Package public portable ZIP and checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '6.2.0'
+          $staging = Join-Path $env:RUNNER_TEMP ('RusDocumentImporter-' + $version)
+          $exampleDir = Join-Path $staging 'examples'
+          New-Item -ItemType Directory -Force -Path $exampleDir | Out-Null
+          Copy-Item 'rus-importer-gui/target/release/rus_document_importer_gui.exe' (Join-Path $staging 'RusDocumentImporter.exe')
+          Copy-Item 'rus-importer-gui/README.md' (Join-Path $staging 'README.md')
+          Copy-Item 'rus-importer-gui/CHANGELOG.md' (Join-Path $staging 'CHANGELOG.md')
+          Copy-Item 'LICENSE' (Join-Path $staging 'LICENSE.txt')
+          Copy-Item 'rus-importer-gui/examples/template_example.csv' (Join-Path $exampleDir 'template_example.csv')
+          $out = 'RusDocumentImporter_' + $version + '_Windows_x64_portable.zip'
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $out -CompressionLevel Optimal -Force
+          $hash = Get-FileHash -Path $out -Algorithm SHA256
+          "$($hash.Hash.ToLower())  $out" | Set-Content -Path 'SHA256SUMS.txt' -Encoding ascii
+          Write-Host "Release: $out"
+          Write-Host "SHA256: $($hash.Hash)"
+      - name: Upload publication-ready ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: RusDocumentImporter_6_2_Release_Portable
+          path: |
+            RusDocumentImporter_6.2.0_Windows_x64_portable.zip
+            SHA256SUMS.txt
+          if-no-files-found: error
       - name: Upload GUI EXE
         uses: actions/upload-artifact@v4
         with:
-          name: RusDocumentImporter_GUI_v6_1_SafeFilenames_Windows_x64
+          name: RusDocumentImporter_GUI_v6_2_Windows_x64
           path: rus-importer-gui/target/release/rus_document_importer_gui.exe
           if-no-files-found: error
