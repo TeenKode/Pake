@@ -1,0 +1,62 @@
+name: Publish RusDocumentImporter Windows release
+
+on:
+  push:
+    tags:
+      - 'rus-document-importer-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-win64:
+    runs-on: windows-latest
+    steps:
+      - name: Check out tagged sources and license
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            rus-importer-gui
+            LICENSE
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache compiled dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rus-importer-gui
+      - name: Unit and integration tests
+        working-directory: rus-importer-gui
+        run: cargo test --release
+      - name: Build Windows portable EXE
+        working-directory: rus-importer-gui
+        run: cargo build --release
+      - name: Build public distribution and SHA-256 manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          $prefix = 'rus-document-importer-v'
+          if (!$tag.StartsWith($prefix)) { throw "Wrong tag $tag" }
+          $version = $tag.Substring($prefix.Length)
+          $cargoVersion = (Select-String -Path 'rus-importer-gui/Cargo.toml' -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          if ($cargoVersion -ne $version) { throw "Tag $version does not match Cargo version $cargoVersion" }
+          $staging = Join-Path $env:RUNNER_TEMP 'RusDocumentImporter-portable'
+          New-Item -ItemType Directory -Force -Path (Join-Path $staging 'examples') | Out-Null
+          Copy-Item 'rus-importer-gui/target/release/rus_document_importer_gui.exe' (Join-Path $staging 'RusDocumentImporter.exe')
+          Copy-Item 'rus-importer-gui/README.md' (Join-Path $staging 'README.md')
+          Copy-Item 'rus-importer-gui/CHANGELOG.md' (Join-Path $staging 'CHANGELOG.md')
+          Copy-Item 'LICENSE' (Join-Path $staging 'LICENSE.txt')
+          Copy-Item 'rus-importer-gui/examples/template_example.csv' (Join-Path $staging 'examples/template_example.csv')
+          $out = 'RusDocumentImporter_' + $version + '_Windows_x64_portable.zip'
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $out -CompressionLevel Optimal -Force
+          $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+          "$sha  $out" | Set-Content -Path 'SHA256SUMS.txt' -Encoding ascii
+          "RELEASE_ARCHIVE=$out" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Create GitHub Release when tag is pushed
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" "$env:RELEASE_ARCHIVE" "SHA256SUMS.txt" `
+            --verify-tag --title "RusDocumentImporter $($env:GITHUB_REF_NAME.Replace('rus-document-importer-v', ''))" `
+            --notes-file 'rus-importer-gui/RELEASE_NOTES.md'
