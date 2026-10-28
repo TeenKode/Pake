@@ -25,6 +25,10 @@ struct TemplateSpec {
     defaults: Vec<String>,
     delimiter: u8,
     example: bool,
+    // Column mapping is optional and user-editable; CSV schemas never have required names.
+    title_column: Option<usize>,
+    asset_column: Option<usize>,
+    example_rows: Vec<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -36,6 +40,10 @@ struct Project {
     #[serde(default)]
     template_path: PathBuf,
     rows: Vec<Document>,
+    #[serde(default)]
+    title_field: Option<String>,
+    #[serde(default)]
+    asset_field: Option<String>,
 }
 
 fn column_index(headers: &[String], name: &str) -> Option<usize> {
@@ -123,28 +131,32 @@ fn read_template(path: &Path) -> Result<TemplateSpec,String> {
     if headers.iter().any(|h| !seen.insert(h.to_lowercase())) {
         return Err("В шаблоне есть повторяющиеся названия колонок".into());
     }
-    if column_index(&headers, "Name").is_none() || column_index(&headers, "File").is_none() {
-        return Err("В CSV-шаблоне должны быть колонки Name и File".into());
-    }
+
     let rows = records.map(|r| r.map_err(|e|e.to_string()))
         .collect::<Result<Vec<_>,_>>()
         .map_err(|e| format!("Ошибка чтения строк шаблона: {e}"))?;
-    let mut defaults = vec![String::new(); headers.len()];
-    let example = rows.len() == 1 && (
-        rows[0].iter().any(|v| v.trim().to_lowercase().starts_with("укажите "))
-        || column_index(&headers,"File").and_then(|i| rows[0].get(i))
-            .map(|v| v.eq_ignore_ascii_case("document.pdf")).unwrap_or(false)
-    );
-    if rows.len() == 1 {
-        for (idx,value) in rows[0].iter().take(defaults.len()).enumerate() {
-            if !example || headers[idx].eq_ignore_ascii_case("Regulatory") {
-                defaults[idx] = value.to_owned();
-            }
-        }
+    // Rows in the provided template are independent examples/data records.
+    // Never silently copy a person's fields into newly generated records.
+    let example_rows: Vec<Vec<String>> = rows.iter()
+        .filter(|row|row.iter().any(|cell|!cell.trim().is_empty()))
+        .map(|row| {
+            (0..headers.len()).map(|i|row.get(i).unwrap_or("").to_owned()).collect()
+        }).collect();
+    let defaults = vec![String::new(); headers.len()];
+    // These are *optional suggestions*, never mandatory columns.
+    let title_column = column_index(&headers,"Name");
+    let asset_column = column_index(&headers,"File").or_else(||column_index(&headers,"Image"));
+    let example = !example_rows.is_empty();
+    Ok(TemplateSpec {path:path.to_path_buf(),headers,defaults,delimiter,example,
+        title_column,asset_column,example_rows})
+}
+fn apply_project_mapping(project:&Project,template:&mut TemplateSpec){
+    if let Some(name)=&project.title_field{
+        template.title_column=column_index(&template.headers,name);
     }
-    if let Some(idx) = column_index(&headers,"Name") { defaults[idx].clear(); }
-    if let Some(idx) = column_index(&headers,"File") { defaults[idx].clear(); }
-    Ok(TemplateSpec {path:path.to_path_buf(),headers,defaults,delimiter,example})
+    if let Some(name)=&project.asset_field{
+        template.asset_column=column_index(&template.headers,name);
+    }
 }
 fn restore_project_rows(project: Project, template: &TemplateSpec) -> Vec<Document> {
     project.rows.into_iter().filter_map(|mut doc| {
@@ -218,38 +230,43 @@ fn doc_extension(ext: &str) -> bool {
         "svg"|"xml"|"html"|"htm"|"mp3"|"mp4"|"wav"|"avi"|"mov"|"dwg"|"dxf")
 }
 
+fn is_supported_asset_extension(ext: &str) -> bool {
+    doc_extension(ext) || matches!(ext,"png"|"jpg"|"jpeg"|"gif"|"bmp"|"webp"|"tiff"|"tif"|"svg")
+}
+fn rows_from_template(template:&TemplateSpec) -> Vec<Document> {
+    template.example_rows.iter().map(|record|Document {
+        source:PathBuf::new(),fields:record.clone(),included:false,
+    }).collect()
+}
 fn scan(folder: &Path, executable: &Path, template: &TemplateSpec) -> io::Result<Vec<Document>> {
+    let Some(asset_col) = template.asset_column else { return Ok(Vec::new()); };
     let mut entries: Vec<_> = fs::read_dir(folder)?
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+        .filter(|entry|entry.file_type().map(|ft|ft.is_file()).unwrap_or(false))
         .collect();
-    entries.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
-    let mut rows = Vec::new();
-    let mut used_names = HashSet::new();
-    let name_col = column_index(&template.headers,"Name").expect("validated template");
-    let file_col = column_index(&template.headers,"File").expect("validated template");
+    entries.sort_by_key(|e|e.file_name().to_string_lossy().to_lowercase());
+    let mut rows=Vec::new();
+    let mut used_names=HashSet::new();
     for entry in entries {
-        let source = entry.path();
-        if source == executable || source == template.path { continue; }
-        let filename = entry.file_name().to_string_lossy().into_owned();
-        let lower = filename.to_lowercase();
-        if lower == PROJECT_NAME.to_lowercase()
-            || lower.starts_with("готовые") && lower.ends_with(".zip") { continue; }
-        let (stem, ext) = name_parts(&filename);
-        let extension = ext.unwrap_or("").to_lowercase();
-        if matches!(extension.as_str(),"exe"|"dll"|"zip"|"json"|"log"|"bak"|"tmp"|"bat"|"cmd"|"ps1"|"csv") { continue; }
-        if !filename.chars().any(is_cyrillic) && !doc_extension(&extension) { continue; }
-        let proposed = clean_import_filename(&filename);
-        let mut i = 1;
-        let resulting_name = loop {
-            let candidate = number_suffix(&proposed, i);
-            if used_names.insert(candidate.to_lowercase()) { break candidate; }
-            i += 1;
+        let source=entry.path();
+        if source==executable || source==template.path {continue;}
+        let filename=entry.file_name().to_string_lossy().into_owned();
+        let extension=source.extension().and_then(|x|x.to_str()).unwrap_or("").to_lowercase();
+        if !is_supported_asset_extension(&extension) {continue;}
+        let (stem,_) = name_parts(&filename);
+        let proposed=clean_import_filename(&filename);
+        let mut index=1;
+        let safe=loop {
+            let candidate=number_suffix(&proposed,index);
+            if used_names.insert(candidate.to_lowercase()){break candidate;}
+            index+=1;
         };
-        let mut fields = template.defaults.clone();
-        fields[name_col] = stem.trim().to_owned();
-        fields[file_col] = resulting_name;
-        rows.push(Document { source, fields, included: true });
+        let mut fields=template.defaults.clone();
+        if let Some(col)=template.title_column {
+            fields[col]=stem.trim().to_owned();
+        }
+        fields[asset_col]=safe;
+        rows.push(Document{source,fields,included:true});
     }
     Ok(rows)
 }
@@ -296,36 +313,25 @@ fn csv_bytes(rows: &[Document], template: &TemplateSpec) -> Result<Vec<u8>,Strin
         .quote_style(csv::QuoteStyle::Necessary)
         .from_writer(Vec::new());
     writer.write_record(&template.headers).map_err(|e|e.to_string())?;
-    let regulatory = column_index(&template.headers,"Regulatory");
     for doc in rows.iter().filter(|row| row.included) {
-        let mut values = doc.fields.clone();
-        if let Some(idx) = regulatory {
-            if let Some(v) = values.get_mut(idx) {
-                *v = match v.trim().to_lowercase().as_str() {
-                    "да"|"yes"|"true"|"1" => "Да".into(),
-                    "нет"|"no"|"false"|"0" => "Нет".into(),
-                    _ => v.clone()
-                };
-            }
-        }
-        writer.write_record(&values).map_err(|e|e.to_string())?;
+        writer.write_record(&doc.fields).map_err(|e|e.to_string())?;
     }
     writer.into_inner().map_err(|e|e.to_string())
 }
 
-fn clean_export_rows(rows: &mut [Document], template: &TemplateSpec) -> usize {
-    let file_col = column_index(&template.headers,"File").expect("validated template");
-    let mut count = 0;
-    let mut used = HashSet::new();
-    for doc in rows.iter_mut().filter(|doc|doc.included) {
-        let base = clean_import_filename(&doc.fields[file_col]);
-        let mut suffix = 1;
-        let filename = loop {
-            let candidate = number_suffix(&base,suffix);
-            if used.insert(candidate.to_lowercase()) { break candidate; }
-            suffix += 1;
+fn clean_export_rows(rows:&mut [Document],template:&TemplateSpec)->usize{
+    let Some(file_col)=template.asset_column else {return 0;};
+    let mut count=0;
+    let mut used=HashSet::new();
+    for doc in rows.iter_mut().filter(|doc|doc.included && !doc.source.as_os_str().is_empty()){
+        let base=clean_import_filename(&doc.fields[file_col]);
+        let mut index=1;
+        let filename=loop{
+            let candidate=number_suffix(&base,index);
+            if used.insert(candidate.to_lowercase()){break candidate;}
+            index+=1;
         };
-        if filename != doc.fields[file_col] { doc.fields[file_col] = filename; count += 1; }
+        if filename!=doc.fields[file_col]{doc.fields[file_col]=filename;count+=1;}
     }
     count
 }
@@ -338,32 +344,31 @@ fn valid_filename(name: &str) -> bool {
     !reserved_name(stem) && name.encode_utf16().count() <= 240
         && clean_import_filename(name) == name
 }
-fn validate_rows(rows: &[Document], template: &TemplateSpec) -> Result<(),String> {
-    let file_col = column_index(&template.headers,"File").expect("validated template");
-    let name_col = column_index(&template.headers,"Name").expect("validated template");
-    let mut used: HashMap<String,usize> = HashMap::new();
-    let mut count = 0usize;
-    for (index,row) in rows.iter().enumerate() {
-        if !row.included { continue; }
-        count += 1;
-        if row.fields.len() != template.headers.len() {
-            return Err(format!("Строка {} не соответствует колонкам шаблона",index+1));
+fn validate_rows(rows:&[Document],template:&TemplateSpec)->Result<(),String>{
+    let mut count=0;
+    let mut used=HashMap::<String,usize>::new();
+    for (index,row) in rows.iter().enumerate(){
+        if !row.included {continue;}
+        count+=1;
+        if row.fields.len()!=template.headers.len(){
+            return Err(format!("Строка {}: число полей не совпадает с шаблоном",index+1));
         }
-        if row.fields[name_col].trim().is_empty() {
-            return Err(format!("Строка {}: не заполнено поле Name",index+1));
+        if row.source.as_os_str().is_empty(){continue;} // CSV-only records are valid.
+        if !row.source.is_file(){
+            return Err(format!("Не найден исходный файл: {}",row.source.display()));
         }
-        let filename = row.fields[file_col].trim();
-        if !valid_filename(filename) {
-            return Err(format!("Строка {}: недопустимое имя File: {}",index+1,filename));
+        let Some(col)=template.asset_column else{
+            return Err("Для вложенных файлов выберите колонку имени файла. CSV-строки без файлов разрешены.".into());
+        };
+        let filename=row.fields[col].trim();
+        if !valid_filename(filename){
+            return Err(format!("Строка {}: недопустимое имя вложения: {}",index+1,filename));
         }
-        if let Some(first) = used.insert(filename.to_lowercase(),index+1) {
-            return Err(format!("Строки {} и {}: одинаковое имя файла {}",first,index+1,filename));
-        }
-        if !row.source.is_file() {
-            return Err(format!("Не найден исходный файл строки {}: {}",index+1,row.source.display()));
+        if let Some(first)=used.insert(filename.to_lowercase(),index+1){
+            return Err(format!("Строки {} и {}: одинаковое имя вложения: {}",first,index+1,filename));
         }
     }
-    if count == 0 { return Err("Нет отмеченных файлов для экспорта".into()); }
+    if count==0{return Err("Нет отмеченных строк для экспорта".into());}
     Ok(())
 }
 fn new_output(folder: &Path) -> io::Result<(PathBuf, PathBuf)> {
@@ -434,26 +439,26 @@ fn patch_zip_windows_metadata(file: &mut File) -> io::Result<()> {
     }
     file.flush()
 }
-fn export(folder: &Path, rows: &[Document], template: &TemplateSpec) -> Result<PathBuf,String> {
-    let mut prepared = rows.to_vec();
-    clean_export_rows(&mut prepared, template);
-    validate_rows(&prepared, template)?;
-    let (directory, zip_path) = new_output(folder).map_err(|e|e.to_string())?;
-    let result = (|| -> io::Result<()> {
-        let csv = csv_bytes(&prepared,template).map_err(io::Error::other)?;
+fn export(folder:&Path,rows:&[Document],template:&TemplateSpec)->Result<PathBuf,String>{
+    let mut prepared=rows.to_vec();
+    clean_export_rows(&mut prepared,template);
+    validate_rows(&prepared,template)?;
+    let (directory,zip_path)=new_output(folder).map_err(|e|e.to_string())?;
+    let result=(||->io::Result<()>{
+        let csv=csv_bytes(&prepared,template).map_err(io::Error::other)?;
         fs::write(directory.join("component_import.csv"),&csv)?;
-        let file_col = column_index(&template.headers,"File").expect("validated template");
-        let mut files = Vec::new();
-        for row in prepared.iter().filter(|row|row.included) {
-            let filename = &row.fields[file_col];
+        let mut files=Vec::new();
+        for row in prepared.iter().filter(|r|r.included && !r.source.as_os_str().is_empty()){
+            let col=template.asset_column.expect("validated attached file");
+            let filename=&row.fields[col];
             fs::copy(&row.source,directory.join(filename))?;
             files.push(filename.clone());
         }
         make_zip(&zip_path,&directory,&files)
     })();
-    if let Err(e) = result {
-        let _ = fs::remove_file(&zip_path);
-        let _ = fs::remove_dir_all(&directory);
+    if let Err(e)=result{
+        let _=fs::remove_file(&zip_path);
+        let _=fs::remove_dir_all(&directory);
         return Err(format!("Не удалось создать архив: {e}"));
     }
     Ok(zip_path)
@@ -494,6 +499,8 @@ fn save_project(folder: &Path, rows: &[Document], template: &TemplateSpec) -> Re
     let project = Project {
         version: 2, folder: PathBuf::from("."), headers: template.headers.clone(),
         template_path, rows,
+        title_field:template.title_column.and_then(|i|template.headers.get(i).cloned()),
+        asset_field:template.asset_column.and_then(|i|template.headers.get(i).cloned()),
     };
     let bytes = serde_json::to_vec_pretty(&project).map_err(|e|e.to_string())?;
     let path = folder.join(PROJECT_NAME);
