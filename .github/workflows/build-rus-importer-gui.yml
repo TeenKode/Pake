@@ -10,6 +10,7 @@ on:
       - build/rus-importer-v5-3-no-brackets-20261028
       - build/rus-importer-v5-4-file-only-brackets-20261028
       - build/rus-importer-v6-dynamic-template-20261028
+      - build/rus-importer-v6-1-safe-filenames-20261028
   workflow_dispatch:
 
 jobs:
@@ -43,10 +44,12 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'rus-gui-smoke'
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
           [IO.File]::WriteAllText((Join-Path $dir 'Положение об аттестации.pdf'), 'sample')
+          [IO.File]::WriteAllText((Join-Path $dir 'Пример №10 (версия)!.pdf'), 'second')
           [IO.File]::WriteAllText((Join-Path $dir 'component_import.csv'), 'Category;File;Name;Extra;Regulatory' + "`r`n" + 'Локальные;sample.pdf;Тест;Школа;да')
           $run = Start-Process -FilePath $bin -ArgumentList @('--smoke-test-folder', ('"' + $dir + '"')) -Wait -PassThru
           if ($run.ExitCode -ne 0) { throw "Program exited with $($run.ExitCode)" }
           if (!(Test-Path (Join-Path $dir 'Готовые/Polozhenie-ob-attestatsii.pdf'))) { throw 'Missing transliterated PDF' }
+          if (!(Test-Path (Join-Path $dir 'Готовые/Primer-10-versiya.pdf'))) { throw 'Unsafe special characters in filename' }
           $csvPath = Join-Path $dir 'Готовые/component_import.csv'
           if (!(Test-Path $csvPath)) { throw 'Missing CSV' }
           $raw = [IO.File]::ReadAllBytes($csvPath)
@@ -57,13 +60,14 @@ jobs:
           if (!$csv.Contains('Положение об аттестации')) { throw 'Russian Name missing' }
           if (!$csv.Contains('Локальные;Polozhenie-ob-attestatsii.pdf;Положение об аттестации;Школа;Да')) { throw 'Template defaults/column mapping failed' }
           if (!$csv.Contains('Polozhenie-ob-attestatsii.pdf')) { throw 'File transliteration missing' }
+          if (!$csv.Contains('Primer-10-versiya.pdf;Пример №10 (версия)!')) { throw 'Special character sanitization / unchanged Russian Name failed' }
           $archive = Join-Path $dir 'Готовые.zip'
           if (!(Test-Path $archive)) { throw 'ZIP missing' }
           Add-Type -AssemblyName System.IO.Compression
           $zip = [IO.Compression.ZipFile]::OpenRead($archive)
           try {
             $names = @($zip.Entries | ForEach-Object { $_.FullName })
-            if ('component_import.csv' -notin $names -or 'Polozhenie-ob-attestatsii.pdf' -notin $names) { throw 'ZIP entries invalid' }
+            if ('component_import.csv' -notin $names -or 'Polozhenie-ob-attestatsii.pdf' -notin $names -or 'Primer-10-versiya.pdf' -notin $names) { throw 'ZIP entries invalid' }
           } finally { $zip.Dispose() }
       - name: Check EXE exists
         shell: pwsh
@@ -72,6 +76,6 @@ jobs:
       - name: Upload GUI EXE
         uses: actions/upload-artifact@v4
         with:
-          name: RusDocumentImporter_GUI_v6_DynamicTemplate_Windows_x64
+          name: RusDocumentImporter_GUI_v6_1_SafeFilenames_Windows_x64
           path: rus-importer-gui/target/release/rus_document_importer_gui.exe
           if-no-files-found: error
