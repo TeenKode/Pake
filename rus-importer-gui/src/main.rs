@@ -249,12 +249,29 @@ fn scan(folder: &Path, executable: &Path, template: &TemplateSpec) -> io::Result
     entries.sort_by_key(|e|e.file_name().to_string_lossy().to_lowercase());
     let mut rows=Vec::new();
     let mut used_names=HashSet::new();
+    // The sample values, when present, suggest a file type without requiring
+    // any particular column name. This avoids importing PDFs as staff photos.
+    let mut sample_image=false;
+    let mut sample_document=false;
+    for sample in &template.example_rows {
+        if let Some(v)=sample.get(asset_col) {
+            let ext=Path::new(v).extension().and_then(|e|e.to_str())
+                .unwrap_or("").to_ascii_lowercase();
+            if matches!(ext.as_str(),"jpg"|"jpeg"|"png"|"gif"|"bmp"|"tiff"|"tif"|"webp"|"svg"){
+                sample_image=true;
+            }
+            if doc_extension(&ext){sample_document=true;}
+        }
+    }
     for entry in entries {
         let source=entry.path();
         if source==executable || source==template.path {continue;}
         let filename=entry.file_name().to_string_lossy().into_owned();
         let extension=source.extension().and_then(|x|x.to_str()).unwrap_or("").to_lowercase();
         if !is_supported_asset_extension(&extension) {continue;}
+        let image=matches!(extension.as_str(),"jpg"|"jpeg"|"png"|"gif"|"bmp"|"tiff"|"tif"|"webp"|"svg");
+        if sample_image && !sample_document && !image {continue;}
+        if sample_document && !sample_image && image {continue;}
         let (stem,_) = name_parts(&filename);
         let proposed=clean_import_filename(&filename);
         let mut index=1;
