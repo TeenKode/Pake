@@ -1,0 +1,7 @@
+/target/
+*.project.json
+*.project.json.tmp
+*.project.json.bak
+/Готовые/
+/Готовые_*/
+/Готовые*.zip
