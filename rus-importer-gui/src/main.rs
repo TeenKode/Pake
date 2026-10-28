@@ -449,11 +449,10 @@ fn relink_document_sources(rows: &mut [Document], folder: &Path) {
             if let Some(name) = row.source.file_name() {
                 row.source = folder.join(name);
             }
-        } else if !row.source.is_file() {
-            if let Some(name) = row.source.file_name() {
-                let candidate = folder.join(name);
-                if candidate.is_file() { row.source = candidate; }
-            }
+        } else if let Some(name) = row.source.file_name() {
+            // Prefer the local copy even while the old location still exists.
+            let candidate = folder.join(name);
+            if candidate.is_file() { row.source = candidate; }
         }
     }
 }
