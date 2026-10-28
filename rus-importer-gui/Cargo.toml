@@ -1,7 +1,12 @@
 [package]
 name = "rus_document_importer_gui"
-version = "6.1.0"
+version = "6.2.0"
 edition = "2021"
+license = "GPL-3.0-only"
+description = "Portable Windows CSV-template document importer and ZIP packager"
+repository = "https://github.com/TeenKode/Pake"
+readme = "README.md"
+publish = false
 
 [dependencies]
 eframe = { version = "=0.31.1", default-features = false, features = ["default_fonts", "glow"] }
