@@ -180,6 +180,29 @@ fn csv_field(index: usize, value: &str) -> String {
     }
     quote_csv(value)
 }
+// Fill fields present in every row of a verified successful import.
+// Existing user-entered values are never overwritten.
+fn fill_missing_metadata(rows: &mut [Document]) -> usize {
+    let mut count = 0;
+    for doc in rows.iter_mut().filter(|d| d.included) {
+        if doc.fields[4].trim().is_empty() {
+            let name = doc.fields[0].trim();
+            if !name.is_empty() {
+                doc.fields[4] = if name.starts_with("РП ") || name.starts_with("Рабочая программа") {
+                    "Рабочая программа".to_string()
+                } else {
+                    name.to_string()
+                };
+                count += 1;
+            }
+        }
+        if doc.fields[7].trim().is_empty() && !doc.fields[6].trim().is_empty() {
+            doc.fields[7] = doc.fields[6].clone();
+            count += 1;
+        }
+    }
+    count
+}
 fn csv_bytes(rows: &[Document]) -> Vec<u8> {
     let mut csv = Vec::new();
     csv.extend_from_slice(HEADERS.join(";").as_bytes());
@@ -287,7 +310,10 @@ fn patch_zip_windows_metadata(file: &mut File) -> io::Result<()> {
     file.flush()
 }
 fn export(folder: &Path, rows: &[Document]) -> Result<PathBuf, String> {
-    validate_rows(rows)?;
+    let mut prepared = rows.to_vec();
+    fill_missing_metadata(&mut prepared);
+    validate_rows(&prepared)?;
+    let rows = prepared.as_slice();
     let (directory, zip_path) = new_output(folder).map_err(|e| e.to_string())?;
     let result = (|| -> io::Result<()> {
         let csv = csv_bytes(rows);
@@ -415,6 +441,23 @@ mod tests {
         assert!(!csv.contains("\"РП Алгебра 10-11 класс\""));
         assert!(!csv.contains("\"\""));
         assert_eq!(quote_csv("содержит;разделитель"), "\"содержит;разделитель\"");
+    }
+    #[test]
+    fn fills_missing_description_and_date_updated_without_overwriting() {
+        let mut fields = std::array::from_fn(|_| String::new());
+        fields[0] = "РП Алгебра 10 класс".into();
+        fields[2] = "Да".into();
+        fields[3] = "RP-Algebra-10-klass.pdf".into();
+        fields[6] = "01.09.2026".into();
+        let mut rows = vec![Document {
+            source: PathBuf::from("example.pdf"), fields, included: true
+        }];
+        assert_eq!(fill_missing_metadata(&mut rows), 2);
+        assert_eq!(rows[0].fields[4], "Рабочая программа");
+        assert_eq!(rows[0].fields[7], "01.09.2026");
+        assert_eq!(fill_missing_metadata(&mut rows), 0);
+        let csv = String::from_utf8(csv_bytes(&rows)).unwrap();
+        assert!(csv.contains(";Рабочая программа;;01.09.2026;01.09.2026;"));
     }
     #[test]
     fn reject_duplicate_filename_after_bulk_change() {
