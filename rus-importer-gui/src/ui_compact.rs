@@ -256,7 +256,7 @@ impl ImporterApp {
     fn toolbar(&mut self,ui:&mut egui::Ui){
         ui.horizontal(|ui|{
             ui.label(RichText::new("Импорт документов").size(18.0).strong().color(ink(self.dark)));
-            ui.label(RichText::new("v6.0").size(11.0).color(dim(self.dark)));
+            ui.label(RichText::new("v6.1").size(11.0).color(dim(self.dark)));
             ui.separator();
             if ui.add(button("Папка",self.dark)).clicked(){self.choose_folder();}
             if ui.add(button("Шаблон CSV",self.dark)).clicked(){self.choose_template();}
@@ -429,7 +429,7 @@ impl ImporterApp {
                             let ext=self.rows[index].source.extension()
                                 .and_then(|x|x.to_str()).unwrap_or("");
                             let proposed=if ext.is_empty(){stem}else{format!("{stem}.{ext}")};
-                            self.rows[index].fields[col]=clean_import_filename(&transliterate_filename(&proposed));
+                            self.rows[index].fields[col]=clean_import_filename(&proposed);
                             self.dirty=true;
                         }
                     }
