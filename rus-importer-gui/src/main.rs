@@ -143,7 +143,7 @@ fn scan(folder: &Path, executable: &Path) -> io::Result<Vec<Document>> {
         let extension = ext.unwrap_or("").to_lowercase();
         if matches!(extension.as_str(), "exe"|"dll"|"zip"|"json"|"log"|"bak"|"tmp"|"bat"|"cmd"|"ps1") { continue; }
         if !filename.chars().any(is_cyrillic) && !doc_extension(&extension) { continue; }
-        let proposed = transliterate_filename(&filename);
+        let proposed = clean_import_filename(&transliterate_filename(&filename));
         let mut i = 1;
         let resulting_name = loop {
             let candidate = number_suffix(&proposed, i);
@@ -151,7 +151,7 @@ fn scan(folder: &Path, executable: &Path) -> io::Result<Vec<Document>> {
             i += 1;
         };
         let mut fields = std::array::from_fn(|_| String::new());
-        fields[0] = stem.trim().to_owned();
+        fields[0] = clean_import_title(stem.trim());
         fields[2] = "Нет".to_owned();
         fields[3] = resulting_name;
         rows.push(Document { source, fields, included: true });
@@ -182,6 +182,56 @@ fn csv_field(index: usize, value: &str) -> String {
 }
 // Fill fields present in every row of a verified successful import.
 // Existing user-entered values are never overwritten.
+// Import site rejects documents when parentheses occur in Name or File.
+// Treat brackets as separators, not as characters to keep in the exported ZIP.
+fn is_bracket(c: char) -> bool {
+    matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '（' | '）')
+}
+fn clean_import_title(value: &str) -> String {
+    if !value.chars().any(is_bracket) { return value.to_owned(); }
+    let stripped: String = value.chars()
+        .map(|ch| if is_bracket(ch) { ' ' } else { ch })
+        .collect();
+    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+fn clean_import_filename(value: &str) -> String {
+    if !value.chars().any(is_bracket) { return value.to_owned(); }
+    let (stem, extension) = name_parts(value);
+    let mut result = String::with_capacity(stem.len());
+    for c in stem.chars() {
+        if is_bracket(c) || c.is_whitespace() || c == '-' {
+            if !result.is_empty() && !result.ends_with('-') { result.push('-'); }
+        } else {
+            result.push(c);
+        }
+    }
+    let stem = result.trim_matches('-');
+    match extension {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem.to_owned(),
+    }
+}
+
+// Guarantee that the CSV File column and the actual PDF names are identical.
+// If cleanup merges two names, add a stable suffix rather than overwrite.
+fn clean_export_rows(rows: &mut [Document]) -> usize {
+    let mut count = 0;
+    let mut used = HashSet::new();
+    for doc in rows.iter_mut().filter(|doc| doc.included) {
+        let title = clean_import_title(&doc.fields[0]);
+        if title != doc.fields[0] { doc.fields[0] = title; count += 1; }
+        let base = clean_import_filename(&doc.fields[3]);
+        let mut suffix = 1;
+        let filename = loop {
+            let candidate = number_suffix(&base, suffix);
+            if used.insert(candidate.to_lowercase()) { break candidate; }
+            suffix += 1;
+        };
+        if filename != doc.fields[3] { doc.fields[3] = filename; count += 1; }
+    }
+    count
+}
+
 fn fill_missing_metadata(rows: &mut [Document]) -> usize {
     let mut count = 0;
     for doc in rows.iter_mut().filter(|d| d.included) {
@@ -312,6 +362,7 @@ fn patch_zip_windows_metadata(file: &mut File) -> io::Result<()> {
 fn export(folder: &Path, rows: &[Document]) -> Result<PathBuf, String> {
     let mut prepared = rows.to_vec();
     fill_missing_metadata(&mut prepared);
+    clean_export_rows(&mut prepared);
     validate_rows(&prepared)?;
     let rows = prepared.as_slice();
     let (directory, zip_path) = new_output(folder).map_err(|e| e.to_string())?;
@@ -458,6 +509,66 @@ mod tests {
         assert_eq!(fill_missing_metadata(&mut rows), 0);
         let csv = String::from_utf8(csv_bytes(&rows)).unwrap();
         assert!(csv.contains(";Рабочая программа;;01.09.2026;01.09.2026;"));
+    }
+    #[test]
+    fn parentheses_cleanup_matches_accepted_import_archive() {
+        assert_eq!(
+            clean_import_title("РП Алгебра 10-11 класс (Базовый)"),
+            "РП Алгебра 10-11 класс Базовый"
+        );
+        assert_eq!(
+            clean_import_filename("RP-Algebra-10-11-klass-(Bazovyy).pdf"),
+            "RP-Algebra-10-11-klass-Bazovyy.pdf"
+        );
+        assert_eq!(
+            clean_import_title("РП информатика 10-11 ((Базовый))"),
+            "РП информатика 10-11 Базовый"
+        );
+        assert_eq!(
+            clean_import_filename("RP-informatika-10-11-((Bazovyy)).pdf"),
+            "RP-informatika-10-11-Bazovyy.pdf"
+        );
+        assert_eq!(
+            clean_import_filename("RP-Geometriya-10-11-klass(Uglublennyy).pdf"),
+            "RP-Geometriya-10-11-klass-Uglublennyy.pdf"
+        );
+        assert_eq!(clean_import_filename("Normal-file.pdf"), "Normal-file.pdf");
+    }
+    #[test]
+    fn export_sanitizes_csv_and_pdf_names_without_modifying_sources() {
+        let root = std::env::temp_dir().join(format!("rus_importer_brackets_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let source_a = root.join("РП Алгебра 10 (Базовый).pdf");
+        let source_b = root.join("РП Алгебра 10 Базовый.pdf");
+        fs::write(&source_a, b"unchanged file A").unwrap();
+        fs::write(&source_b, b"unchanged file B").unwrap();
+        let mut first = std::array::from_fn(|_| String::new());
+        first[0] = "РП Алгебра 10 (Базовый)".into();
+        first[2] = "Да".into();
+        first[3] = "RP-Algebra-10-(Bazovyy).pdf".into();
+        let mut second = std::array::from_fn(|_| String::new());
+        second[0] = "РП Алгебра 10 Базовый".into();
+        second[2] = "Да".into();
+        second[3] = "RP-Algebra-10-Bazovyy.pdf".into();
+        let rows = vec![
+            Document {source: source_a.clone(),fields:first,included:true},
+            Document {source: source_b.clone(),fields:second,included:true},
+        ];
+        let zip_path = export(&root, &rows).unwrap();
+        let mut zip = zip::ZipArchive::new(File::open(zip_path).unwrap()).unwrap();
+        let mut csv = String::new();
+        zip.by_name("component_import.csv").unwrap().read_to_string(&mut csv).unwrap();
+        assert!(csv.contains("РП Алгебра 10 Базовый;;Да;RP-Algebra-10-Bazovyy.pdf;"));
+        assert!(csv.contains("РП Алгебра 10 Базовый;;Да;RP-Algebra-10-Bazovyy_2.pdf;"));
+        assert!(!csv.contains('(') && !csv.contains(')'));
+        assert_eq!(zip.by_name("RP-Algebra-10-Bazovyy.pdf").unwrap().size(), 16);
+        assert_eq!(zip.by_name("RP-Algebra-10-Bazovyy_2.pdf").unwrap().size(), 16);
+        assert_eq!(fs::read(&source_a).unwrap(), b"unchanged file A");
+        assert_eq!(fs::read(&source_b).unwrap(), b"unchanged file B");
+        assert_eq!(rows[0].fields[0], "РП Алгебра 10 (Базовый)");
+        drop(zip);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn reject_duplicate_filename_after_bulk_change() {
