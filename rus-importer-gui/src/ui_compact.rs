@@ -198,7 +198,7 @@ impl ImporterApp {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Импорт документов").size(18.0).strong().color(text_color(self.dark)));
-            label(ui, "v5.3", self.dark);
+            label(ui, "v5.4", self.dark);
             ui.separator();
             if ui.add(button("Папка", self.dark)).on_hover_text("Выбрать папку с документами").clicked() {
                 self.choose_folder();
