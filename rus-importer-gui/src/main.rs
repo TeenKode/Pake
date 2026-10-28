@@ -73,7 +73,8 @@ fn template_candidates(folder: &Path) -> Result<Vec<PathBuf>, String> {
     csv_files.sort_by_key(|p|p.file_name().unwrap_or_default().to_string_lossy().to_lowercase());
     other_text.sort_by_key(|p|p.file_name().unwrap_or_default().to_string_lossy().to_lowercase());
     // .txt files count as templates only when they have the required Name/File headers.
-    csv_files.extend(other_text.into_iter().filter(|p|read_template(p).is_ok()));
+    csv_files.extend(other_text.into_iter().filter(|p|
+        read_template(p).map(|t|t.headers.len() >= 2).unwrap_or(false)));
     if csv_files.is_empty() && !excel_files.is_empty() {
         return Err(format!(
             "В папке найден шаблон Excel ({}), но нужен CSV. В Excel: Файл → Сохранить как → CSV UTF-8.",
@@ -174,10 +175,6 @@ fn restore_project_rows(project: Project, template: &TemplateSpec) -> Vec<Docume
         }
         Some(doc)
     }).collect()
-}
-
-fn is_cyrillic(ch: char) -> bool {
-    matches!(ch, 'А'..='я' | 'Ё' | 'ё')
 }
 
 fn translit_char(ch: char) -> Option<&'static str> {
