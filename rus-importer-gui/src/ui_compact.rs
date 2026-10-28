@@ -114,6 +114,8 @@ pub(super) struct ImporterApp {
     confirm_rescan:bool,
     pending_folder:Option<PathBuf>,
     last_export:Option<PathBuf>,
+    template_options:Vec<PathBuf>,
+    pending_project:Option<Project>,
 }
 impl ImporterApp {
     fn new(cc:&eframe::CreationContext<'_>)->Self{
@@ -126,6 +128,7 @@ impl ImporterApp {
             show_bulk:false,bulk_column:0,bulk_value:String::new(),bulk_checked:false,
             undo_bulk:None,status:String::new(),error:false,dirty:false,
             confirm_rescan:false,pending_folder:None,last_export:None,
+            template_options:Vec::new(),pending_project:None,
         };
         let folder=app.folder.clone();
         app.open_folder(folder);
@@ -136,6 +139,7 @@ impl ImporterApp {
     fn open_folder(&mut self,folder:PathBuf){
         self.folder=folder.clone();self.template=None;self.rows.clear();self.active_row=None;
         self.undo_bulk=None;self.dirty=false;self.last_export=None;
+        self.template_options.clear();self.pending_project=None;
         let project_path=folder.join(PROJECT_NAME);
         let project=if project_path.is_file() || folder.join(format!("{PROJECT_NAME}.bak")).is_file(){
             match load_project(&project_path){
@@ -143,20 +147,23 @@ impl ImporterApp {
                 Err(e)=>{self.fail(format!("Не удалось открыть сохранённый проект: {e}"));return;}
             }
         }else{None};
-        let from_project=project.as_ref().and_then(|p|{
-            let name=p.template_path.file_name()?;
-            let local=folder.join(name);
-            local.is_file().then_some(local)
-        });
-        let path=from_project.or_else(||template_filename(&folder));
-        let Some(path)=path else{
-            self.fail("Нужен CSV-шаблон в папке с документами. Нажмите «Шаблон CSV».");
-            return;
+        let options=match template_candidates(&folder){
+            Ok(options)=>options,
+            Err(err)=>{self.fail(err);return;}
         };
-        self.open_template_path(path,project);
+        let valid:Vec<PathBuf>=options.iter().filter(|p|read_template(p).is_ok()).cloned().collect();
+        let options=if valid.is_empty(){options}else{valid};
+        if options.len()>1 {
+            self.template_options=options;
+            self.pending_project=project;
+            self.info("Найдено несколько CSV-шаблонов. Выберите нужный из списка.");
+            return;
+        }
+        self.open_template_path(options[0].clone(),project);
     }
     fn open_template_path(&mut self,path:PathBuf,project:Option<Project>){
         let new=match read_template(&path){Ok(t)=>t,Err(e)=>{self.fail(e);return;}};
+        self.template_options.clear();self.pending_project=None;
         let executable=std::env::current_exe().unwrap_or_default();
         let rows=match project {
             Some(p)=>{
@@ -189,7 +196,7 @@ impl ImporterApp {
     }
     fn choose_template(&mut self){
         if let Some(path)=rfd::FileDialog::new().set_directory(&self.folder)
-            .add_filter("CSV",&["csv"]).pick_file(){
+            .add_filter("CSV и TSV",&["csv","tsv","txt"]).pick_file(){
             if path.parent()!=Some(self.folder.as_path()){
                 self.fail("CSV-шаблон должен находиться в папке с документами.");
                 return;
@@ -481,6 +488,31 @@ impl ImporterApp {
             });
         });
     }
+    fn template_selection_window(&mut self,ctx:&egui::Context){
+        if self.template_options.is_empty(){return;}
+        let candidates=self.template_options.clone();
+        egui::Window::new("Выберите CSV-шаблон").collapsible(false)
+            .resizable(false).anchor(egui::Align2::CENTER_CENTER,[0.0,0.0])
+            .show(ctx,|ui|{
+                ui.label("В папке несколько подходящих файлов. Укажите тот, который предоставил сайт.");
+                ui.add_space(6.0);
+                for path in candidates {
+                    let title=path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    let note=read_template(&path).ok()
+                        .map(|t|format!(" · {} колонок",t.headers.len())).unwrap_or_default();
+                    if ui.button(format!("{title}{note}")).clicked(){
+                        let project=self.pending_project.take();
+                        self.template_options.clear();
+                        self.open_template_path(path,project);
+                    }
+                }
+                ui.add_space(4.0);
+                if ui.button("Выбрать другой файл...").clicked(){
+                    self.template_options.clear();self.pending_project=None;
+                    self.choose_template();
+                }
+            });
+    }
     fn confirmation(&mut self,ctx:&egui::Context){
         if self.confirm_rescan{
             egui::Window::new("Перечитать шаблон и обновить список?").collapsible(false)
@@ -540,6 +572,7 @@ impl eframe::App for ImporterApp {
             .show(ctx,|ui|{
                 self.filterbar(ui);ui.separator();self.table(ui);
             });
+        self.template_selection_window(ctx);
         self.confirmation(ctx);
     }
 }
