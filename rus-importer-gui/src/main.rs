@@ -3,7 +3,7 @@
 use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use zip::write::FileOptions;
@@ -233,7 +233,8 @@ fn new_output(folder: &Path) -> io::Result<(PathBuf, PathBuf)> {
     Err(io::Error::new(io::ErrorKind::AlreadyExists, "Исчерпаны имена папок экспорта"))
 }
 fn make_zip(archive: &Path, folder: &Path, files: &[String]) -> io::Result<()> {
-    let file = File::create(archive)?;
+    // Read/write is required when adjusting the finished ZIP central directory.
+    let file = OpenOptions::new().read(true).write(true).create_new(true).open(archive)?;
     let mut zip = ZipWriter::new(file);
     let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
     for name in std::iter::once("component_import.csv").chain(files.iter().map(String::as_str)) {
