@@ -397,7 +397,7 @@ impl ImporterApp {
     }
     fn toolbar(&mut self,ui:&mut egui::Ui){
         ui.horizontal(|ui|{
-            ui.label(RichText::new("Импорт документов").size(18.0).strong().color(ink(self.dark)));
+            ui.label(RichText::new("Импорт CSV").size(18.0).strong().color(ink(self.dark)));
             ui.label(RichText::new("v6.3").size(11.0).color(dim(self.dark)));
             ui.separator();
             if ui.add(button("Папка",self.dark)).clicked(){self.choose_folder();}
@@ -555,14 +555,14 @@ impl ImporterApp {
     }
     fn inspector(&mut self,ui:&mut egui::Ui){
         ui.horizontal(|ui|{
-            ui.label(RichText::new("Поля документа").strong().color(ink(self.dark)));
+            ui.label(RichText::new("Поля записи").strong().color(ink(self.dark)));
             ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{
                 if ui.small_button("Закрыть").clicked(){self.show_editor=false;}
             });
         });
         let Some(template)=&self.template else{return;};
         let Some(index)=self.active_row else{
-            ui.label(RichText::new("Выберите номер строки.").size(11.0).color(dim(self.dark)));
+            ui.label(RichText::new("Выберите строку для редактирования.").size(11.0).color(dim(self.dark)));
             return;
         };
         if index>=self.rows.len(){self.active_row=None;return;}
@@ -734,6 +734,6 @@ pub(super) fn launch()->eframe::Result{
             .with_min_inner_size([860.0,520.0]),
         ..Default::default()
     };
-    eframe::run_native("Импорт документов",options,
+    eframe::run_native("Импорт CSV",options,
         Box::new(|cc|Ok(Box::new(ImporterApp::new(cc)))))
 }
