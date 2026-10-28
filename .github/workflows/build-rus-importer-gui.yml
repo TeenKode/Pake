@@ -8,6 +8,7 @@ on:
       - build/rus-importer-gui-v5-1-csv-compat-20261028
       - build/rus-importer-v5-2-required-fields-20261028
       - build/rus-importer-v5-3-no-brackets-20261028
+      - build/rus-importer-v5-4-file-only-brackets-20261028
   workflow_dispatch:
 
 jobs:
@@ -68,6 +69,6 @@ jobs:
       - name: Upload GUI EXE
         uses: actions/upload-artifact@v4
         with:
-          name: RusDocumentImporter_GUI_v5_3_NoBrackets_Windows_x64
+          name: RusDocumentImporter_GUI_v5_4_FilenameOnly_Windows_x64
           path: rus-importer-gui/target/release/rus_document_importer_gui.exe
           if-no-files-found: error
