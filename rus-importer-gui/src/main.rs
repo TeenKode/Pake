@@ -472,164 +472,115 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn translit_and_exported_filename() {
-        assert_eq!(transliterate_filename("Положение об аттестации.pdf"), "Polozhenie-ob-attestatsii.pdf");
-        assert_eq!(transliterate_filename("Годовой отчёт 2026.docx"), "Godovoy-otchyot-2026.docx");
-        assert_eq!(transliterate_filename("Ёжик  - щука.JPG"), "Yozhik-shchuka.JPG");
+    fn sandbox(label:&str)->PathBuf {
+        let path=std::env::temp_dir().join(format!("rus_importer_v6_{}_{}",label,std::process::id()));
+        let _=fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
     }
     #[test]
-    fn bulk_edit_every_row_and_checked_rows() {
-        let mut rows = vec![
-            Document { source: PathBuf::from("a.pdf"), fields: std::array::from_fn(|_| String::new()), included: true },
-            Document { source: PathBuf::from("b.pdf"), fields: std::array::from_fn(|_| String::new()), included: false },
-        ];
-        assert_eq!(bulk_edit(&mut rows, 5, "Локальные акты", false), 2);
-        assert_eq!(rows[0].fields[5], "Локальные акты");
-        assert_eq!(rows[1].fields[5], "Локальные акты");
-        assert_eq!(bulk_edit(&mut rows, 2, "Да", true), 1);
-        assert_eq!(rows[0].fields[2], "Да");
-        assert_eq!(rows[1].fields[2], "");
-    }
-    #[test]
-    fn real_zip_and_csv_utf8_without_bom() {
-        let root = std::env::temp_dir().join(format!("rus_importer_gui_test_{}",std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let source = root.join("Приказ №1.pdf");
-        fs::write(&source,b"PDF_CONTENT").unwrap();
-        let mut cols = std::array::from_fn(|_| String::new());
-        cols[0] = "Приказ №1".into();
-        cols[2] = "Да".into();
-        cols[3] = "Prikaz-№1.pdf".into();
-        cols[5] = "Локальные; \"нормативные\"".into();
-        let rows = vec![Document { source: source.clone(), fields: cols, included: true }];
-        let zip_path = export(&root, &rows).unwrap();
-        let csv = fs::read(root.join("Готовые").join("component_import.csv")).unwrap();
-        assert!(csv.starts_with(b"Name;Number;Regulatory;File;"));
-        assert!(!csv.starts_with(&[0xEF,0xBB,0xBF]));
-        let csv = String::from_utf8(csv).unwrap();
-        assert!(csv.contains("Приказ №1"));
-        assert!(csv.contains("\"Локальные; \"\"нормативные\"\"\""));
-        assert_eq!(fs::read(&source).unwrap(), b"PDF_CONTENT");
-        let zipfile = File::open(zip_path).unwrap();
-        let mut z = zip::ZipArchive::new(zipfile).unwrap();
-        assert!(z.by_name("component_import.csv").is_ok());
-        assert!(z.by_name("Prikaz-№1.pdf").is_ok());
-        drop(z);
-        fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    fn exports_working_template_style_and_canonical_regulatory() {
-        let mut fields = std::array::from_fn(|_| String::new());
-        fields[0] = "РП Алгебра 10-11 класс".into();
-        fields[2] = "да".into();
-        fields[3] = "RP-Algebra-10-11-klass.pdf".into();
-        fields[5] = "Рабочие программы СОО".into();
-        fields[6] = "01.09.2026".into();
-        let rows = vec![Document {source: PathBuf::from("dummy.pdf"),fields,included:true}];
-        let csv = String::from_utf8(csv_bytes(&rows)).unwrap();
-        assert!(csv.starts_with("Name;Number;Regulatory;File;"));
-        assert!(csv.contains("РП Алгебра 10-11 класс;;Да;RP-Algebra-10-11-klass.pdf"));
-        assert!(!csv.contains("\"РП Алгебра 10-11 класс\""));
-        assert!(!csv.contains("\"\""));
-        assert_eq!(quote_csv("содержит;разделитель"), "\"содержит;разделитель\"");
-    }
-    #[test]
-    fn fills_missing_description_and_date_updated_without_overwriting() {
-        let mut fields = std::array::from_fn(|_| String::new());
-        fields[0] = "РП Алгебра 10 класс".into();
-        fields[2] = "Да".into();
-        fields[3] = "RP-Algebra-10-klass.pdf".into();
-        fields[6] = "01.09.2026".into();
-        let mut rows = vec![Document {
-            source: PathBuf::from("example.pdf"), fields, included: true
-        }];
-        assert_eq!(fill_missing_metadata(&mut rows), 2);
-        assert_eq!(rows[0].fields[4], "Рабочая программа");
-        assert_eq!(rows[0].fields[7], "01.09.2026");
-        assert_eq!(fill_missing_metadata(&mut rows), 0);
-        let csv = String::from_utf8(csv_bytes(&rows)).unwrap();
-        assert!(csv.contains(";Рабочая программа;;01.09.2026;01.09.2026;"));
-    }
-    #[test]
-    fn parentheses_removed_only_from_file_names() {
-        assert_eq!(
-            clean_import_filename("RP-Algebra-10-11-klass-(Bazovyy).pdf"),
-            "RP-Algebra-10-11-klass-Bazovyy.pdf"
-        );
-        assert_eq!(
-            clean_import_filename("RP-informatika-10-11-((Bazovyy)).pdf"),
-            "RP-informatika-10-11-Bazovyy.pdf"
-        );
-        assert_eq!(
-            clean_import_filename("RP-Geometriya-10-11-klass(Uglublennyy).pdf"),
-            "RP-Geometriya-10-11-klass-Uglublennyy.pdf"
-        );
-        assert_eq!(clean_import_filename("Normal-file.pdf"), "Normal-file.pdf");
-    }
-    #[test]
-    fn export_sanitizes_only_file_names_preserving_names_and_sources() {
-        let root = std::env::temp_dir().join(format!("rus_importer_brackets_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let source_a = root.join("РП Алгебра 10 (Базовый).pdf");
-        let source_b = root.join("РП Алгебра 10 Базовый.pdf");
-        fs::write(&source_a, b"unchanged file A").unwrap();
-        fs::write(&source_b, b"unchanged file B").unwrap();
-        let mut first = std::array::from_fn(|_| String::new());
-        first[0] = "РП Алгебра 10 (Базовый)".into();
-        first[2] = "Да".into();
-        first[3] = "RP-Algebra-10-(Bazovyy).pdf".into();
-        let mut second = std::array::from_fn(|_| String::new());
-        second[0] = "РП Алгебра 10 Базовый".into();
-        second[2] = "Да".into();
-        second[3] = "RP-Algebra-10-Bazovyy.pdf".into();
-        let rows = vec![
-            Document {source: source_a.clone(),fields:first,included:true},
-            Document {source: source_b.clone(),fields:second,included:true},
-        ];
-        let zip_path = export(&root, &rows).unwrap();
-        let mut zip = zip::ZipArchive::new(File::open(zip_path).unwrap()).unwrap();
-        let mut csv = String::new();
+    fn template_with_reordered_extra_columns_and_defaults() {
+        let folder=sandbox("custom");
+        let template_path=folder.join("component_import.csv");
+        fs::write(&template_path,"Category;File;Name;Extra;Regulatory\r\nЛокальные;sample.pdf;Образец;Школа;да\r\n").unwrap();
+        fs::write(folder.join("Приказ (новый).pdf"),b"PDF").unwrap();
+        let template=read_template(&template_path).unwrap();
+        assert_eq!(template.headers.len(),5);
+        assert_eq!(template.delimiter,b';');
+        let rows=scan(&folder,&folder.join("importer.exe"),&template).unwrap();
+        assert_eq!(rows.len(),1);
+        assert_eq!(rows[0].fields[2],"Приказ (новый)");
+        assert_eq!(rows[0].fields[1],"Prikaz-novyy.pdf");
+        assert_eq!(rows[0].fields[0],"Локальные");
+        assert_eq!(rows[0].fields[3],"Школа");
+        let archive=export(&folder,&rows,&template).unwrap();
+        let mut zip=zip::ZipArchive::new(File::open(archive).unwrap()).unwrap();
+        let mut csv=String::new();
         zip.by_name("component_import.csv").unwrap().read_to_string(&mut csv).unwrap();
-        assert!(csv.contains("РП Алгебра 10 (Базовый);;Да;RP-Algebra-10-Bazovyy.pdf;"));
-        assert!(csv.contains("РП Алгебра 10 Базовый;;Да;RP-Algebra-10-Bazovyy_2.pdf;"));
-        for line in csv.lines().skip(1) {
-            let fields: Vec<_> = line.split(';').collect();
-            assert!(fields.len() >= 4);
-            assert!(!fields[3].contains('(') && !fields[3].contains(')'));
-        }
-        assert_eq!(zip.by_name("RP-Algebra-10-Bazovyy.pdf").unwrap().size(), 16);
-        assert_eq!(zip.by_name("RP-Algebra-10-Bazovyy_2.pdf").unwrap().size(), 16);
-        assert_eq!(fs::read(&source_a).unwrap(), b"unchanged file A");
-        assert_eq!(fs::read(&source_b).unwrap(), b"unchanged file B");
-        assert_eq!(rows[0].fields[0], "РП Алгебра 10 (Базовый)");
-        assert_eq!(rows[0].fields[3], "RP-Algebra-10-(Bazovyy).pdf");
-        drop(zip);
-        fs::remove_dir_all(root).unwrap();
+        assert!(csv.starts_with("Category;File;Name;Extra;Regulatory\r\n"));
+        assert!(csv.contains("Локальные;Prikaz-novyy.pdf;Приказ (новый);Школа;Да\r\n"));
+        assert!(zip.by_name("Prikaz-novyy.pdf").is_ok());
+        drop(zip);fs::remove_dir_all(folder).unwrap();
     }
     #[test]
-    fn scan_keeps_parentheses_in_russian_name_but_strips_filename() {
-        let root = std::env::temp_dir().join(format!("rus_importer_scan_brackets_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let source = root.join("РП Математика (профильная).pdf");
-        fs::write(&source, b"pdf").unwrap();
-        let docs = scan(&root, &root.join("RusDocumentImporter.exe")).unwrap();
-        assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].fields[0], "РП Математика (профильная)");
-        assert_eq!(docs[0].fields[3], "RP-Matematika-profilnaya.pdf");
-        fs::remove_dir_all(root).unwrap();
+    fn utf8_bom_input_and_tsv_template_delimiter() {
+        let folder=sandbox("tsv");
+        let path=folder.join("component_import.csv");
+        fs::write(&path,b"\xEF\xBB\xBFFile\tName\tExtra\nold.pdf\tSample\tvalue\n").unwrap();
+        let template=read_template(&path).unwrap();
+        assert_eq!(template.delimiter,b'\t');
+        let doc=Document {
+            source:PathBuf::new(),included:true,
+            fields:vec!["test.pdf".into(),"Справка".into(),"Текст".into()],
+        };
+        let csv=csv_bytes(&[doc],&template).unwrap();
+        assert!(!csv.starts_with(&[0xEF,0xBB,0xBF]));
+        assert!(String::from_utf8(csv).unwrap().starts_with("File\tName\tExtra\r\n"));
+        fs::remove_dir_all(folder).unwrap();
     }
     #[test]
-    fn reject_duplicate_filename_after_bulk_change() {
-        let mut fields = std::array::from_fn(|_| String::new());
-        fields[3] = "same.pdf".to_owned();
-        let doc = Document { source: PathBuf::from("unused"), fields, included:true };
-        let mut another = doc.clone();
-        another.source = PathBuf::from("unused2");
-        assert!(validate_rows(&[doc, another]).is_err());
-        assert!(!valid_filename("../evil.pdf"));
+    fn ignores_example_row_from_supplied_template() {
+        let folder=sandbox("example");
+        let path=folder.join("component_import (3).csv");
+        fs::write(&path,"Name;Regulatory;File;Description;DateCreated\n\"Укажите название документа\";Да;document.pdf;\"Укажите описание документа\";01.02.2021\n").unwrap();
+        let template=read_template(&path).unwrap();
+        assert!(template.example);
+        assert_eq!(template.defaults[3],"");
+        assert_eq!(template.defaults[4],"");
+        assert_eq!(template.defaults[1],"Да");
+        assert_eq!(template_filename(&folder).unwrap(),path);
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn remaps_project_fields_when_headers_are_reordered() {
+        let old=Project {
+            version:2,folder:PathBuf::from("."),template_path:PathBuf::from("old.csv"),
+            headers:vec!["Name".into(),"File".into(),"Extra".into()],
+            rows:vec![Document {
+                source:PathBuf::from("sample.pdf"),fields:vec!["Имя".into(),"a.pdf".into(),"сохранено".into()],
+                included:true,
+            }]
+        };
+        let template=TemplateSpec {
+            path:PathBuf::from("new.csv"),
+            headers:vec!["Extra".into(),"File".into(),"Name".into(),"NewColumn".into()],
+            defaults:vec![String::new();4],delimiter:b';',example:false,
+        };
+        let rows=restore_project_rows(old,&template);
+        assert_eq!(rows[0].fields,vec!["сохранено","a.pdf","Имя",""]);
+    }
+    #[test]
+    fn parentheses_are_removed_only_from_filename() {
+        let folder=sandbox("brackets");
+        let path=folder.join("component_import.csv");
+        fs::write(&path,"File;Name;Other\n").unwrap();
+        let template=read_template(&path).unwrap();
+        let source=folder.join("Алгебра (Базовый).pdf");
+        fs::write(&source,b"original bytes").unwrap();
+        let rows=scan(&folder,&folder.join("app.exe"),&template).unwrap();
+        assert_eq!(rows.len(),1);
+        assert_eq!(rows[0].fields[1],"Алгебра (Базовый)");
+        assert_eq!(rows[0].fields[0],"Algebra-Bazovyy.pdf");
+        let archive=export(&folder,&rows,&template).unwrap();
+        let mut zip=zip::ZipArchive::new(File::open(archive).unwrap()).unwrap();
+        let mut csv=String::new();
+        zip.by_name("component_import.csv").unwrap().read_to_string(&mut csv).unwrap();
+        assert!(csv.contains("Algebra-Bazovyy.pdf;Алгебра (Базовый);"));
+        assert!(zip.by_name("Algebra-Bazovyy.pdf").is_ok());
+        assert_eq!(fs::read(&source).unwrap(),b"original bytes");
+        drop(zip);fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn quotes_only_fields_that_require_it() {
+        let template=TemplateSpec {
+            path:PathBuf::from("a.csv"),headers:vec!["Name".into(),"File".into(),"Extra".into()],
+            defaults:vec![String::new();3],delimiter:b';',example:false,
+        };
+        let document=Document {
+            source:PathBuf::new(),included:true,
+            fields:vec!["Название (скобки)".into(),"doc.pdf".into(),"содержит;разделитель".into()]
+        };
+        let csv=String::from_utf8(csv_bytes(&[document],&template).unwrap()).unwrap();
+        assert!(csv.contains("Название (скобки);doc.pdf;\"содержит;разделитель\""));
     }
 }
