@@ -156,20 +156,6 @@ fn translit_char(ch: char) -> Option<&'static str> {
     })
 }
 
-fn translit_stem(text: &str) -> String {
-    let mut output = String::new();
-    for ch in text.chars() {
-        if ch.is_whitespace() || ch == '-' || ch == '_' {
-            if !output.is_empty() && !output.ends_with('-') { output.push('-'); }
-        } else if let Some(part) = translit_char(ch) {
-            output.push_str(part);
-        } else if !ch.is_control() && !matches!(ch, '/'|'\\'|':'|'*'|'?'|'"'|'<'|'>'|'|') {
-            output.push(ch);
-        }
-    }
-    output.trim_end_matches(['-', '.', ' ']).to_string()
-}
-
 fn name_parts(filename: &str) -> (&str, Option<&str>) {
     match filename.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => (stem, Some(ext)),
@@ -191,20 +177,6 @@ fn reserved_name(stem: &str) -> bool {
     matches!(first.as_str(), "CON"|"PRN"|"AUX"|"NUL") ||
         (first.len() == 4 && (first.starts_with("COM") || first.starts_with("LPT"))
           && matches!(first.as_bytes()[3], b'1'..=b'9'))
-}
-fn transliterate_filename(filename: &str) -> String {
-    let (stem, ext) = name_parts(filename);
-    let mut stem = translit_stem(stem);
-    if stem.is_empty() { stem = "file".to_owned(); }
-    if reserved_name(&stem) { stem.push('_'); }
-    let stem = crop_utf16(&stem, 180);
-    match ext {
-        Some(ext) => {
-            let ext = crop_utf16(&translit_stem(ext), 50);
-            if ext.is_empty() { stem } else { format!("{stem}.{ext}") }
-        }
-        None => stem,
-    }
 }
 fn number_suffix(name: &str, index: usize) -> String {
     if index == 1 { return name.to_owned(); }
@@ -469,20 +441,62 @@ fn bulk_edit(rows: &mut [Document],column:usize,value:&str,only_checked:bool) ->
     }
     changed
 }
+/// Make projects movable between computers and disks; v2 projects with old absolute
+/// source paths are still supported when their basenames exist in the new folder.
+fn relink_document_sources(rows: &mut [Document], folder: &Path) {
+    for row in rows {
+        if row.source.is_relative() {
+            if let Some(name) = row.source.file_name() {
+                row.source = folder.join(name);
+            }
+        } else if !row.source.is_file() {
+            if let Some(name) = row.source.file_name() {
+                let candidate = folder.join(name);
+                if candidate.is_file() { row.source = candidate; }
+            }
+        }
+    }
+}
 fn save_project(folder: &Path, rows: &[Document], template: &TemplateSpec) -> Result<PathBuf,String> {
+    let mut rows = rows.to_vec();
+    for row in &mut rows {
+        if let Ok(relative) = row.source.strip_prefix(folder) {
+            row.source = relative.to_path_buf();
+        }
+    }
+    let template_path = template.path.strip_prefix(folder)
+        .map(Path::to_path_buf).unwrap_or_else(|_| template.path.clone());
     let project = Project {
-        version:2,folder:folder.to_path_buf(),headers:template.headers.clone(),
-        template_path:template.path.clone(),rows:rows.to_vec(),
+        version: 2, folder: PathBuf::from("."), headers: template.headers.clone(),
+        template_path, rows,
     };
     let bytes = serde_json::to_vec_pretty(&project).map_err(|e|e.to_string())?;
     let path = folder.join(PROJECT_NAME);
-    let temp = folder.join(format!("{PROJECT_NAME}.tmp"));
-    fs::write(&temp,bytes).map_err(|e|e.to_string())?;
-    fs::rename(&temp,&path).map_err(|e|e.to_string())?;
-    Ok(path)
+    let temporary = folder.join(format!("{PROJECT_NAME}.tmp"));
+    let backup = folder.join(format!("{PROJECT_NAME}.bak"));
+    fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
+    if path.is_file() {
+        if backup.exists() {
+            fs::remove_file(&backup).map_err(|e| e.to_string())?;
+        }
+        fs::rename(&path, &backup).map_err(|e| e.to_string())?;
+    }
+    match fs::rename(&temporary, &path) {
+        Ok(()) => {
+            // Backup is left only if cleanup fails; it cannot block future loading.
+            let _ = fs::remove_file(&backup);
+            Ok(path)
+        }
+        Err(error) => {
+            if backup.is_file() { let _ = fs::rename(&backup, &path); }
+            let _ = fs::remove_file(&temporary);
+            Err(format!("Не удалось сохранить проект: {error}"))
+        }
+    }
 }
 fn load_project(path: &Path) -> Result<Project,String> {
-    let raw = fs::read(path).map_err(|e|e.to_string())?;
+    let backup = path.with_file_name(format!("{PROJECT_NAME}.bak"));
+    let raw = fs::read(path).or_else(|_| fs::read(&backup)).map_err(|e|e.to_string())?;
     let project: Project = serde_json::from_slice(&raw).map_err(|e|e.to_string())?;
     if project.version != 1 && project.version != 2 { return Err("Неизвестная версия проекта".into()); }
     Ok(project)
@@ -648,6 +662,47 @@ mod tests {
         assert_eq!(rows[0].fields[1],"РП_Алгебра+1(новая)!№.pdf");
         drop(zip);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn saved_project_uses_relative_source_paths_and_survives_folder_move() {
+        let original = sandbox("project_portable_original");
+        let destination = sandbox("project_portable_new");
+        let template_path = original.join("component_import.csv");
+        fs::write(&template_path,"Name;File;Custom\n").unwrap();
+        let t = read_template(&template_path).unwrap();
+        let filename = "РП Математика (профиль).pdf";
+        let source = original.join(filename);
+        fs::write(&source,b"PDF").unwrap();
+        let rows = scan(&original,&original.join("app.exe"),&t).unwrap();
+        save_project(&original,&rows,&t).unwrap();
+        let saved = fs::read_to_string(original.join(PROJECT_NAME)).unwrap();
+        assert!(!saved.contains(&original.display().to_string()));
+        fs::copy(&source,destination.join(filename)).unwrap();
+        fs::copy(&template_path,destination.join("component_import.csv")).unwrap();
+        fs::copy(original.join(PROJECT_NAME),destination.join(PROJECT_NAME)).unwrap();
+        let project = load_project(&destination.join(PROJECT_NAME)).unwrap();
+        let mut moved = restore_project_rows(project, &read_template(&destination.join("component_import.csv")).unwrap());
+        relink_document_sources(&mut moved, &destination);
+        assert_eq!(moved[0].source,destination.join(filename));
+        assert!(moved[0].source.is_file());
+        fs::remove_dir_all(original).unwrap();
+        fs::remove_dir_all(destination).unwrap();
+    }
+    #[test]
+    fn saving_project_twice_is_supported_on_windows_and_keeps_latest_edit() {
+        let folder=sandbox("save_twice");
+        let template_path=folder.join("component_import.csv");
+        fs::write(&template_path,"Name;File;Custom\n").unwrap();
+        let template=read_template(&template_path).unwrap();
+        let source=folder.join("Документ.pdf");
+        fs::write(&source,b"source").unwrap();
+        let mut rows=scan(&folder,&folder.join("app.exe"),&template).unwrap();
+        save_project(&folder,&rows,&template).unwrap();
+        rows[0].fields[2] = "Изменённое значение".into();
+        save_project(&folder,&rows,&template).unwrap();
+        let restored=load_project(&folder.join(PROJECT_NAME)).unwrap();
+        assert_eq!(restored.rows[0].fields[2],"Изменённое значение");
+        fs::remove_dir_all(folder).unwrap();
     }
     #[test]
     fn quotes_only_fields_that_require_it() {
