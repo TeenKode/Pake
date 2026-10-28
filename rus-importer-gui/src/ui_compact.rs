@@ -568,8 +568,31 @@ impl ImporterApp {
         if index>=self.rows.len(){self.active_row=None;return;}
         let fields=template.headers.clone();
         let file_idx=template.asset_column;
-        ui.label(RichText::new(self.rows[index].source.file_name().unwrap_or_default()
-            .to_string_lossy().to_string()).size(11.0).color(dim(self.dark)));
+        let filename=self.rows[index].source.file_name()
+            .map(|n|n.to_string_lossy().into_owned())
+            .unwrap_or_else(||"Без прикреплённого файла".to_owned());
+        ui.label(RichText::new(filename).size(11.0).color(dim(self.dark)));
+        ui.horizontal(|ui|{
+            if ui.small_button("Прикрепить файл").clicked(){
+                if let Some(col)=template.asset_column{
+                    if let Some(path)=rfd::FileDialog::new().set_directory(&self.folder).pick_file(){
+                        let name=path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        self.rows[index].source=path;
+                        self.rows[index].fields[col]=clean_import_filename(&name);
+                        self.rows[index].included=true;
+                        self.dirty=true;
+                    }
+                } else {
+                    self.show_mapping=true;
+                    self.fail("Назначьте колонку имени вложения в «Колонки файлов».");
+                }
+            }
+            if !self.rows[index].source.as_os_str().is_empty()
+                && ui.small_button("Убрать вложение").clicked(){
+                    self.rows[index].source=PathBuf::new();
+                    self.dirty=true;
+                }
+        });
         ui.separator();
         egui::ScrollArea::vertical().id_salt("v6_fields").show(ui,|ui|{
             for (col,heading) in fields.iter().enumerate(){
