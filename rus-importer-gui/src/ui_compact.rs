@@ -568,6 +568,7 @@ impl ImporterApp {
         if index>=self.rows.len(){self.active_row=None;return;}
         let fields=template.headers.clone();
         let file_idx=template.asset_column;
+        let title_idx=template.title_column;
         let filename=self.rows[index].source.file_name()
             .map(|n|n.to_string_lossy().into_owned())
             .unwrap_or_else(||"Без прикреплённого файла".to_owned());
@@ -610,7 +611,7 @@ impl ImporterApp {
                 }
                 if file_idx==Some(col){
                     if ui.small_button("Сделать имя из названия").clicked(){
-                        if let Some(name_idx)=template.title_column{
+                        if let Some(name_idx)=title_idx{
                             let stem=self.rows[index].fields[name_idx].clone();
                             let ext=self.rows[index].source.extension()
                                 .and_then(|x|x.to_str()).unwrap_or("");
