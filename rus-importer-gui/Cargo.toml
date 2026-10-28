@@ -1,6 +1,6 @@
 [package]
 name = "rus_document_importer_gui"
-version = "6.2.0"
+version = "6.3.0"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "Portable Windows CSV-template document importer and ZIP packager"
