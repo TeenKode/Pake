@@ -217,6 +217,7 @@ impl ImporterApp {
                     headers:previous.headers.clone(),rows:self.rows.clone(),
                     title_field:previous.title_column.and_then(|i|previous.headers.get(i).cloned()),
                     asset_field:previous.asset_column.and_then(|i|previous.headers.get(i).cloned()),
+                    mapping_configured:true,
                 })
             } else {None};
             self.open_template_path(path,project);
@@ -232,6 +233,7 @@ impl ImporterApp {
                     version:2,folder:self.folder.clone(),template_path:template.path,
                     title_field:template.title_column.and_then(|i|template.headers.get(i).cloned()),
                     asset_field:template.asset_column.and_then(|i|template.headers.get(i).cloned()),
+                    mapping_configured:true,
                     headers:template.headers,rows:self.rows.clone(),
                 };
                 apply_project_mapping(&old,&mut new);
@@ -342,6 +344,7 @@ impl ImporterApp {
         if !self.show_mapping{return;}
         let Some(t)=self.template.as_mut() else{return;};
         let headers=t.headers.clone();
+        let before=(t.title_column,t.asset_column);
         ui.horizontal(|ui|{
             ui.label(RichText::new("Название:").color(dim(self.dark)));
             egui::ComboBox::from_id_salt("title_role")
@@ -366,6 +369,7 @@ impl ImporterApp {
             ui.label(RichText::new("Назначение необязательно для CSV без вложений.").size(11.0)
                 .color(dim(self.dark)));
         });
+        if before!=(t.title_column,t.asset_column){self.dirty=true;}
     }
     fn bulk_apply(&mut self,clear:bool){
         let Some(template)=&self.template else{return;};
