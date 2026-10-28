@@ -163,6 +163,8 @@ impl ImporterApp {
         }
     }
     fn generate(&mut self) {
+        let filled = fill_missing_metadata(&mut self.rows);
+        if filled > 0 { self.dirty = true; }
         match export(&self.folder, &self.rows) {
             Ok(path) => {
                 if save_project(&self.folder, &self.rows).is_ok() { self.dirty = false; }
@@ -196,7 +198,7 @@ impl ImporterApp {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Импорт документов").size(18.0).strong().color(text_color(self.dark)));
-            label(ui, "v5.1", self.dark);
+            label(ui, "v5.2", self.dark);
             ui.separator();
             if ui.add(button("Папка", self.dark)).on_hover_text("Выбрать папку с документами").clicked() {
                 self.choose_folder();
