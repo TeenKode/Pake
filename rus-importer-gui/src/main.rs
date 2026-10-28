@@ -220,7 +220,7 @@ fn doc_extension(ext: &str) -> bool {
         "svg"|"xml"|"html"|"htm"|"mp3"|"mp4"|"wav"|"avi"|"mov"|"dwg"|"dxf")
 }
 
-fn scan(folder: &Path, executable: &Path) -> io::Result<Vec<Document>> {
+fn scan(folder: &Path, executable: &Path, template: &TemplateSpec) -> io::Result<Vec<Document>> {
     let mut entries: Vec<_> = fs::read_dir(folder)?
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
@@ -228,16 +228,18 @@ fn scan(folder: &Path, executable: &Path) -> io::Result<Vec<Document>> {
     entries.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
     let mut rows = Vec::new();
     let mut used_names = HashSet::new();
+    let name_col = column_index(&template.headers,"Name").expect("validated template");
+    let file_col = column_index(&template.headers,"File").expect("validated template");
     for entry in entries {
         let source = entry.path();
-        if source == executable { continue; }
+        if source == executable || source == template.path { continue; }
         let filename = entry.file_name().to_string_lossy().into_owned();
         let lower = filename.to_lowercase();
-        if lower == "component_import.csv" || lower == PROJECT_NAME.to_lowercase()
+        if lower == PROJECT_NAME.to_lowercase()
             || lower.starts_with("готовые") && lower.ends_with(".zip") { continue; }
         let (stem, ext) = name_parts(&filename);
         let extension = ext.unwrap_or("").to_lowercase();
-        if matches!(extension.as_str(), "exe"|"dll"|"zip"|"json"|"log"|"bak"|"tmp"|"bat"|"cmd"|"ps1") { continue; }
+        if matches!(extension.as_str(),"exe"|"dll"|"zip"|"json"|"log"|"bak"|"tmp"|"bat"|"cmd"|"ps1"|"csv") { continue; }
         if !filename.chars().any(is_cyrillic) && !doc_extension(&extension) { continue; }
         let proposed = clean_import_filename(&transliterate_filename(&filename));
         let mut i = 1;
@@ -246,111 +248,55 @@ fn scan(folder: &Path, executable: &Path) -> io::Result<Vec<Document>> {
             if used_names.insert(candidate.to_lowercase()) { break candidate; }
             i += 1;
         };
-        let mut fields = std::array::from_fn(|_| String::new());
-        fields[0] = stem.trim().to_owned();
-        fields[2] = "Нет".to_owned();
-        fields[3] = resulting_name;
+        let mut fields = template.defaults.clone();
+        fields[name_col] = stem.trim().to_owned();
+        fields[file_col] = resulting_name;
         rows.push(Document { source, fields, included: true });
     }
     Ok(rows)
 }
 
-// The target importer's working example uses bare values for ordinary cells.
-// Quote only if required for valid semicolon-delimited CSV.
-fn quote_csv(value: &str) -> String {
-    if value.chars().any(|c| matches!(c, ';' | '"' | '\r' | '\n')) {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_owned()
-    }
-}
-fn csv_field(index: usize, value: &str) -> String {
-    if index == 2 {
-        // Regulatory: canonical strings as in the successfully imported sample.
-        let canonical = match value.trim().to_lowercase().as_str() {
-            "да" | "yes" | "true" | "1" => "Да",
-            "нет" | "no" | "false" | "0" => "Нет",
-            _ => value,
-        };
-        return quote_csv(canonical);
-    }
-    quote_csv(value)
-}
-// Fill fields present in every row of a verified successful import.
-// Existing user-entered values are never overwritten.
-// Import site rejects documents when parentheses occur in Name or File.
-// Treat brackets as separators, not as characters to keep in the exported ZIP.
-fn is_bracket(c: char) -> bool {
-    matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '（' | '）')
-}
-fn clean_import_filename(value: &str) -> String {
-    if !value.chars().any(is_bracket) { return value.to_owned(); }
-    let (stem, extension) = name_parts(value);
-    let mut result = String::with_capacity(stem.len());
-    for c in stem.chars() {
-        if is_bracket(c) || c.is_whitespace() || c == '-' {
-            if !result.is_empty() && !result.ends_with('-') { result.push('-'); }
-        } else {
-            result.push(c);
+// Keep all template headings, their order, and their original delimiter.
+fn csv_bytes(rows: &[Document], template: &TemplateSpec) -> Result<Vec<u8>,String> {
+    let mut writer = csv::WriterBuilder::new().delimiter(template.delimiter)
+        .terminator(csv::Terminator::CRLF)
+        .quote_style(csv::QuoteStyle::Necessary)
+        .from_writer(Vec::new());
+    writer.write_record(&template.headers).map_err(|e|e.to_string())?;
+    let regulatory = column_index(&template.headers,"Regulatory");
+    for doc in rows.iter().filter(|row| row.included) {
+        let mut values = doc.fields.clone();
+        if let Some(idx) = regulatory {
+            if let Some(v) = values.get_mut(idx) {
+                *v = match v.trim().to_lowercase().as_str() {
+                    "да"|"yes"|"true"|"1" => "Да".into(),
+                    "нет"|"no"|"false"|"0" => "Нет".into(),
+                    _ => v.clone()
+                };
+            }
         }
+        writer.write_record(&values).map_err(|e|e.to_string())?;
     }
-    let stem = result.trim_matches('-');
-    match extension {
-        Some(ext) => format!("{stem}.{ext}"),
-        None => stem.to_owned(),
-    }
+    writer.into_inner().map_err(|e|e.to_string())
 }
 
-// Guarantee that the CSV File column and the actual PDF names are identical.
-// If cleanup merges two names, add a stable suffix rather than overwrite.
-fn clean_export_rows(rows: &mut [Document]) -> usize {
+fn clean_export_rows(rows: &mut [Document], template: &TemplateSpec) -> usize {
+    let file_col = column_index(&template.headers,"File").expect("validated template");
     let mut count = 0;
     let mut used = HashSet::new();
-    for doc in rows.iter_mut().filter(|doc| doc.included) {
-        let base = clean_import_filename(&doc.fields[3]);
+    for doc in rows.iter_mut().filter(|doc|doc.included) {
+        let base = clean_import_filename(&doc.fields[file_col]);
         let mut suffix = 1;
         let filename = loop {
-            let candidate = number_suffix(&base, suffix);
+            let candidate = number_suffix(&base,suffix);
             if used.insert(candidate.to_lowercase()) { break candidate; }
             suffix += 1;
         };
-        if filename != doc.fields[3] { doc.fields[3] = filename; count += 1; }
+        if filename != doc.fields[file_col] { doc.fields[file_col] = filename; count += 1; }
     }
     count
 }
 
-fn fill_missing_metadata(rows: &mut [Document]) -> usize {
-    let mut count = 0;
-    for doc in rows.iter_mut().filter(|d| d.included) {
-        if doc.fields[4].trim().is_empty() {
-            let name = doc.fields[0].trim();
-            if !name.is_empty() {
-                doc.fields[4] = if name.starts_with("РП ") || name.starts_with("Рабочая программа") {
-                    "Рабочая программа".to_string()
-                } else {
-                    name.to_string()
-                };
-                count += 1;
-            }
-        }
-        if doc.fields[7].trim().is_empty() && !doc.fields[6].trim().is_empty() {
-            doc.fields[7] = doc.fields[6].clone();
-            count += 1;
-        }
-    }
-    count
-}
-fn csv_bytes(rows: &[Document]) -> Vec<u8> {
-    let mut csv = Vec::new();
-    csv.extend_from_slice(HEADERS.join(";").as_bytes());
-    csv.extend_from_slice(b"\r\n");
-    for doc in rows.iter().filter(|row| row.included) {
-        let row = doc.fields.iter().enumerate().map(|(i, field)| csv_field(i, field)).collect::<Vec<_>>().join(";");
-        csv.extend_from_slice(row.as_bytes());
-        csv.extend_from_slice(b"\r\n");
-    }
-    csv
-}
 fn valid_filename(name: &str) -> bool {
     if name.is_empty() || name == "." || name == ".." ||
        name.ends_with([' ', '.']) || name.chars().any(|c| c.is_control() ||
@@ -358,24 +304,32 @@ fn valid_filename(name: &str) -> bool {
     let (stem, _) = name_parts(name);
     !reserved_name(stem) && name.encode_utf16().count() <= 240
 }
-fn validate_rows(rows: &[Document]) -> Result<(), String> {
-    let mut used: HashMap<String, usize> = HashMap::new();
+fn validate_rows(rows: &[Document], template: &TemplateSpec) -> Result<(),String> {
+    let file_col = column_index(&template.headers,"File").expect("validated template");
+    let name_col = column_index(&template.headers,"Name").expect("validated template");
+    let mut used: HashMap<String,usize> = HashMap::new();
     let mut count = 0usize;
-    for (index, row) in rows.iter().enumerate() {
+    for (index,row) in rows.iter().enumerate() {
         if !row.included { continue; }
         count += 1;
-        let name = row.fields[3].trim();
-        if !valid_filename(name) {
-            return Err(format!("Строка {}: в колонке «Файл» недопустимое имя: {}", index+1, name));
+        if row.fields.len() != template.headers.len() {
+            return Err(format!("Строка {} не соответствует колонкам шаблона",index+1));
         }
-        if let Some(first) = used.insert(name.to_lowercase(), index+1) {
-            return Err(format!("Строки {} и {}: одинаковое имя файла «{}». Измените колонку «Файл».", first, index+1, name));
+        if row.fields[name_col].trim().is_empty() {
+            return Err(format!("Строка {}: не заполнено поле Name",index+1));
+        }
+        let filename = row.fields[file_col].trim();
+        if !valid_filename(filename) {
+            return Err(format!("Строка {}: недопустимое имя File: {}",index+1,filename));
+        }
+        if let Some(first) = used.insert(filename.to_lowercase(),index+1) {
+            return Err(format!("Строки {} и {}: одинаковое имя файла {}",first,index+1,filename));
         }
         if !row.source.is_file() {
-            return Err(format!("Не найден исходный файл строки {}: {}", index+1, row.source.display()));
+            return Err(format!("Не найден исходный файл строки {}: {}",index+1,row.source.display()));
         }
     }
-    if count == 0 { return Err("Нет отмеченных файлов для экспорта.".to_owned()); }
+    if count == 0 { return Err("Нет отмеченных файлов для экспорта".into()); }
     Ok(())
 }
 fn new_output(folder: &Path) -> io::Result<(PathBuf, PathBuf)> {
@@ -446,69 +400,70 @@ fn patch_zip_windows_metadata(file: &mut File) -> io::Result<()> {
     }
     file.flush()
 }
-fn export(folder: &Path, rows: &[Document]) -> Result<PathBuf, String> {
+fn export(folder: &Path, rows: &[Document], template: &TemplateSpec) -> Result<PathBuf,String> {
     let mut prepared = rows.to_vec();
-    fill_missing_metadata(&mut prepared);
-    clean_export_rows(&mut prepared);
-    validate_rows(&prepared)?;
-    let rows = prepared.as_slice();
-    let (directory, zip_path) = new_output(folder).map_err(|e| e.to_string())?;
+    clean_export_rows(&mut prepared, template);
+    validate_rows(&prepared, template)?;
+    let (directory, zip_path) = new_output(folder).map_err(|e|e.to_string())?;
     let result = (|| -> io::Result<()> {
-        let csv = csv_bytes(rows);
-        fs::write(directory.join("component_import.csv"), &csv)?;
-        let mut filenames = Vec::new();
-        for row in rows.iter().filter(|row| row.included) {
-            let filename = &row.fields[3];
-            fs::copy(&row.source, directory.join(filename))?;
-            filenames.push(filename.clone());
+        let csv = csv_bytes(&prepared,template).map_err(io::Error::other)?;
+        fs::write(directory.join("component_import.csv"),&csv)?;
+        let file_col = column_index(&template.headers,"File").expect("validated template");
+        let mut files = Vec::new();
+        for row in prepared.iter().filter(|row|row.included) {
+            let filename = &row.fields[file_col];
+            fs::copy(&row.source,directory.join(filename))?;
+            files.push(filename.clone());
         }
-        make_zip(&zip_path, &directory, &filenames)
+        make_zip(&zip_path,&directory,&files)
     })();
-    if let Err(error) = result {
+    if let Err(e) = result {
         let _ = fs::remove_file(&zip_path);
         let _ = fs::remove_dir_all(&directory);
-        return Err(format!("Не удалось сохранить файлы: {error}"));
+        return Err(format!("Не удалось создать архив: {e}"));
     }
     Ok(zip_path)
 }
-fn bulk_edit(rows: &mut [Document], column: usize, value: &str, only_checked: bool) -> usize {
-    if column >= 14 { return 0; }
-    let mut updated = 0;
-    for row in rows {
-        if !only_checked || row.included {
-            row.fields[column] = value.to_owned();
-            updated += 1;
+fn bulk_edit(rows: &mut [Document],column:usize,value:&str,only_checked:bool) -> usize {
+    let mut changed = 0;
+    for doc in rows.iter_mut().filter(|r|!only_checked || r.included) {
+        if let Some(cell) = doc.fields.get_mut(column) {
+            *cell = value.to_owned(); changed += 1;
         }
     }
-    updated
+    changed
 }
-fn save_project(folder: &Path, rows: &[Document]) -> Result<PathBuf, String> {
-    let project = Project { version: 1, folder: folder.to_owned(), rows: rows.to_vec() };
-    let raw = serde_json::to_vec_pretty(&project).map_err(|e| e.to_string())?;
+fn save_project(folder: &Path, rows: &[Document], template: &TemplateSpec) -> Result<PathBuf,String> {
+    let project = Project {
+        version:2,folder:folder.to_path_buf(),headers:template.headers.clone(),
+        template_path:template.path.clone(),rows:rows.to_vec(),
+    };
+    let bytes = serde_json::to_vec_pretty(&project).map_err(|e|e.to_string())?;
     let path = folder.join(PROJECT_NAME);
-    let temporary = folder.join(format!("{PROJECT_NAME}.tmp"));
-    fs::write(&temporary, raw).map_err(|e| e.to_string())?;
-    fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+    let temp = folder.join(format!("{PROJECT_NAME}.tmp"));
+    fs::write(&temp,bytes).map_err(|e|e.to_string())?;
+    fs::rename(&temp,&path).map_err(|e|e.to_string())?;
     Ok(path)
 }
-fn load_project(path: &Path) -> Result<Project, String> {
-    let raw = fs::read(path).map_err(|e| e.to_string())?;
-    let parsed: Project = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
-    if parsed.version != 1 { return Err("Неизвестная версия файла проекта".into()); }
-    Ok(parsed)
+fn load_project(path: &Path) -> Result<Project,String> {
+    let raw = fs::read(path).map_err(|e|e.to_string())?;
+    let project: Project = serde_json::from_slice(&raw).map_err(|e|e.to_string())?;
+    if project.version != 1 && project.version != 2 { return Err("Неизвестная версия проекта".into()); }
+    Ok(project)
 }
 
 #[path = "ui_compact.rs"]
 mod ui;
 
 fn main() -> eframe::Result {
-    // Headless integration mode for Windows build validation; normal launches use GUI.
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() == 3 && args[1] == "--smoke-test-folder" {
         let folder = PathBuf::from(&args[2]);
-        let rows = scan(&folder, &std::env::current_exe().unwrap_or_default()).unwrap();
+        let template_path = template_filename(&folder).expect("CSV template not found");
+        let template = read_template(&template_path).expect("Invalid CSV template");
+        let rows = scan(&folder,&std::env::current_exe().unwrap_or_default(),&template).unwrap();
         if rows.is_empty() { std::process::exit(3); }
-        if export(&folder, &rows).is_err() { std::process::exit(4); }
+        if export(&folder,&rows,&template).is_err() { std::process::exit(4); }
         return Ok(());
     }
     ui::launch()
