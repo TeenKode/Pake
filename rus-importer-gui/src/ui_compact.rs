@@ -575,7 +575,7 @@ impl ImporterApp {
         ui.label(RichText::new(filename).size(11.0).color(dim(self.dark)));
         ui.horizontal(|ui|{
             if ui.small_button("Прикрепить файл").clicked(){
-                if let Some(col)=template.asset_column{
+                if let Some(col)=file_idx{
                     if let Some(path)=rfd::FileDialog::new().set_directory(&self.folder).pick_file(){
                         let name=path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                         self.rows[index].source=path;
