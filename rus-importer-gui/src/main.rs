@@ -44,6 +44,8 @@ struct Project {
     title_field: Option<String>,
     #[serde(default)]
     asset_field: Option<String>,
+    #[serde(default)]
+    mapping_configured: bool,
 }
 
 fn column_index(headers: &[String], name: &str) -> Option<usize> {
@@ -151,11 +153,11 @@ fn read_template(path: &Path) -> Result<TemplateSpec,String> {
         title_column,asset_column,example_rows})
 }
 fn apply_project_mapping(project:&Project,template:&mut TemplateSpec){
-    if let Some(name)=&project.title_field{
-        template.title_column=column_index(&template.headers,name);
-    }
-    if let Some(name)=&project.asset_field{
-        template.asset_column=column_index(&template.headers,name);
+    if project.mapping_configured {
+        template.title_column=project.title_field.as_deref()
+            .and_then(|name|column_index(&template.headers,name));
+        template.asset_column=project.asset_field.as_deref()
+            .and_then(|name|column_index(&template.headers,name));
     }
 }
 fn restore_project_rows(project: Project, template: &TemplateSpec) -> Vec<Document> {
@@ -501,6 +503,7 @@ fn save_project(folder: &Path, rows: &[Document], template: &TemplateSpec) -> Re
         template_path, rows,
         title_field:template.title_column.and_then(|i|template.headers.get(i).cloned()),
         asset_field:template.asset_column.and_then(|i|template.headers.get(i).cloned()),
+        mapping_configured:true,
     };
     let bytes = serde_json::to_vec_pretty(&project).map_err(|e|e.to_string())?;
     let path = folder.join(PROJECT_NAME);
@@ -627,6 +630,7 @@ mod tests {
                 included:true,
             }],
             title_field:Some("Name".into()),asset_field:Some("File".into()),
+            mapping_configured:true,
         };
         let template=TemplateSpec {
             path:PathBuf::from("new.csv"),
