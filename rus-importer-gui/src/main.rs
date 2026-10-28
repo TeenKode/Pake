@@ -257,6 +257,25 @@ fn scan(folder: &Path, executable: &Path, template: &TemplateSpec) -> io::Result
 }
 
 // Keep all template headings, their order, and their original delimiter.
+fn is_bracket(c:char)->bool {
+    matches!(c,'('|')'|'['|']'|'{'|'}'|'（'|'）')
+}
+fn clean_import_filename(value:&str)->String {
+    if !value.chars().any(is_bracket) { return value.to_owned(); }
+    let (stem,extension)=name_parts(value);
+    let mut result=String::with_capacity(stem.len());
+    for c in stem.chars(){
+        if is_bracket(c) || c.is_whitespace() || c=='-' {
+            if !result.is_empty() && !result.ends_with('-'){result.push('-');}
+        }else{result.push(c);}
+    }
+    let stem=result.trim_matches('-');
+    match extension {
+        Some(ext)=>format!("{stem}.{ext}"),
+        None=>stem.to_owned(),
+    }
+}
+
 fn csv_bytes(rows: &[Document], template: &TemplateSpec) -> Result<Vec<u8>,String> {
     let mut writer = csv::WriterBuilder::new().delimiter(template.delimiter)
         .terminator(csv::Terminator::CRLF)
