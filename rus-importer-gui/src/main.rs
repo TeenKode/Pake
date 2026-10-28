@@ -241,7 +241,7 @@ fn scan(folder: &Path, executable: &Path, template: &TemplateSpec) -> io::Result
         let extension = ext.unwrap_or("").to_lowercase();
         if matches!(extension.as_str(),"exe"|"dll"|"zip"|"json"|"log"|"bak"|"tmp"|"bat"|"cmd"|"ps1"|"csv") { continue; }
         if !filename.chars().any(is_cyrillic) && !doc_extension(&extension) { continue; }
-        let proposed = clean_import_filename(&transliterate_filename(&filename));
+        let proposed = clean_import_filename(&filename);
         let mut i = 1;
         let resulting_name = loop {
             let candidate = number_suffix(&proposed, i);
@@ -257,22 +257,37 @@ fn scan(folder: &Path, executable: &Path, template: &TemplateSpec) -> io::Result
 }
 
 // Keep all template headings, their order, and their original delimiter.
-fn is_bracket(c:char)->bool {
-    matches!(c,'('|')'|'['|']'|'{'|'}'|'（'|'）')
-}
-fn clean_import_filename(value:&str)->String {
-    if !value.chars().any(is_bracket) { return value.to_owned(); }
-    let (stem,extension)=name_parts(value);
-    let mut result=String::with_capacity(stem.len());
-    for c in stem.chars(){
-        if is_bracket(c) || c.is_whitespace() || c=='-' {
-            if !result.is_empty() && !result.ends_with('-'){result.push('-');}
-        }else{result.push(c);}
+/// Build a filesystem and site-safe basename. Only ASCII Latin letters, digits,
+/// '-' and '_' are allowed. Punctuation and spaces become single '-' separators.
+/// Cyrillic text is transliterated so manually edited File fields are safe too.
+fn safe_filename_part(raw: &str) -> String {
+    let mut result = String::new();
+    for character in raw.chars() {
+        if let Some(latin) = translit_char(character) {
+            result.push_str(latin);
+        } else if character.is_ascii_alphanumeric() || character == '_' {
+            result.push(character);
+        } else if character == '-' || !character.is_ascii_alphanumeric() {
+            if !result.is_empty() && !result.ends_with('-') && !result.ends_with('_') {
+                result.push('-');
+            }
+        }
     }
-    let stem=result.trim_matches('-');
+    result.trim_matches('-').to_owned()
+}
+
+/// Only the separator before the extension may be a dot.
+fn clean_import_filename(value: &str) -> String {
+    let (stem, extension) = name_parts(value);
+    let mut safe_stem = crop_utf16(&safe_filename_part(stem), 180);
+    if safe_stem.is_empty() { safe_stem = "file".to_owned(); }
+    if reserved_name(&safe_stem) { safe_stem.push('_'); }
+    let extension = extension
+        .map(|e| crop_utf16(&safe_filename_part(e), 50))
+        .filter(|e| !e.is_empty());
     match extension {
-        Some(ext)=>format!("{stem}.{ext}"),
-        None=>stem.to_owned(),
+        Some(e) => format!("{safe_stem}.{e}"),
+        None => safe_stem,
     }
 }
 
@@ -322,6 +337,7 @@ fn valid_filename(name: &str) -> bool {
         matches!(c, '/'|'\\'|':'|'*'|'?'|'"'|'<'|'>'|'|')) { return false; }
     let (stem, _) = name_parts(name);
     !reserved_name(stem) && name.encode_utf16().count() <= 240
+        && clean_import_filename(name) == name
 }
 fn validate_rows(rows: &[Document], template: &TemplateSpec) -> Result<(),String> {
     let file_col = column_index(&template.headers,"File").expect("validated template");
@@ -588,6 +604,49 @@ mod tests {
         assert!(zip.by_name("Algebra-Bazovyy.pdf").is_ok());
         assert_eq!(fs::read(&source).unwrap(),b"original bytes");
         drop(zip);fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn safe_filename_uses_only_latin_digits_hyphens_underscores_and_extension_dot() {
+        assert_eq!(clean_import_filename("Приказ №12 (новый)!.pdf"), "Prikaz-12-novyy.pdf");
+        assert_eq!(clean_import_filename("отчёт_за-2026.pdf"), "otchyot_za-2026.pdf");
+        assert_eq!(clean_import_filename("a.b@c#d?.PDF"), "a-b-c-d.PDF");
+        assert_eq!(clean_import_filename("CON.txt"), "CON_.txt");
+        assert_eq!(clean_import_filename("!!!.pdf"), "file.pdf");
+        assert_eq!(clean_import_filename("a<>/|\\\\b.docx"), "a-b.docx");
+        for raw in ["name%20.pdf","тест(документ).pdf","special+chars+=.doc",
+            "name\\u{2603}\\u{1F600}.txt", "a.b@c#d?.PDF", "отчёт_за-2026.pdf"]
+        {
+            let filename = clean_import_filename(raw);
+            let (stem, extension) = name_parts(&filename);
+            assert!(stem.chars().all(|ch|ch.is_ascii_alphanumeric()||ch=='-'||ch=='_'), "{filename}");
+            if let Some(ext) = extension {
+                assert!(ext.chars().all(|ch|ch.is_ascii_alphanumeric()||ch=='-'||ch=='_'),"{filename}");
+            }
+            assert!(valid_filename(&filename),"{filename}");
+        }
+    }
+    #[test]
+    fn sanitizes_filename_in_export_zip_and_csv_preserving_russian_name() {
+        let root = sandbox("safe_export");
+        let template_path = root.join("component_import.csv");
+        fs::write(&template_path, "Name;File;Extra\n").unwrap();
+        let source = root.join("РП Алгебра (базовая)_2026 №1.pdf");
+        fs::write(&source,b"original document").unwrap();
+        let template = read_template(&template_path).unwrap();
+        let mut rows = scan(&root,&root.join("app.exe"),&template).unwrap();
+        assert_eq!(rows[0].fields[0],"РП Алгебра (базовая)_2026 №1");
+        rows[0].fields[1] = "РП_Алгебра+1(новая)!№.pdf".to_owned();
+        let archive = export(&root,&rows,&template).unwrap();
+        let mut zip = zip::ZipArchive::new(File::open(archive).unwrap()).unwrap();
+        let filename = "RP_Algebra-1-novaya.pdf";
+        let mut csv = String::new();
+        zip.by_name("component_import.csv").unwrap().read_to_string(&mut csv).unwrap();
+        assert!(csv.contains(&format!("РП Алгебра (базовая)_2026 №1;{filename};")));
+        assert_eq!(zip.by_name(filename).unwrap().size(),16);
+        assert_eq!(fs::read(&source).unwrap(),b"original document");
+        assert_eq!(rows[0].fields[1],"РП_Алгебра+1(новая)!№.pdf");
+        drop(zip);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn quotes_only_fields_that_require_it() {
