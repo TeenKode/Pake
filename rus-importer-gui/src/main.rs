@@ -9,35 +9,131 @@ use std::path::{Path, PathBuf};
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-const HEADERS: [&str; 14] = [
-    "Name", "Number", "Regulatory", "File", "Description", "Category",
-    "DateCreated", "DateUpdated", "Hypertext", "Graphic", "DateEDS",
-    "FioEDS", "PositionEDS", "EDS",
-];
-const LABELS: [&str; 14] = [
-    "Название", "Номер", "Нормативный", "Файл", "Описание", "Категория",
-    "Дата создания", "Дата изменения", "Гипертекст", "Графика",
-    "Дата ЭП", "ФИО подписанта", "Должность", "Электронная подпись",
-];
-const COLUMN_WIDTHS: [f32; 14] = [
-    235.0, 105.0, 115.0, 235.0, 280.0, 200.0, 150.0,
-    150.0, 210.0, 195.0, 150.0, 180.0, 200.0, 190.0,
-];
 const PROJECT_NAME: &str = "RusDocumentImporter.project.json";
-const PAGE_SIZE: usize = 45;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Document {
     source: PathBuf,
-    fields: [String; 14],
+    fields: Vec<String>,
     included: bool,
+}
+
+#[derive(Clone)]
+struct TemplateSpec {
+    path: PathBuf,
+    headers: Vec<String>,
+    defaults: Vec<String>,
+    delimiter: u8,
+    example: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Project {
     version: u32,
     folder: PathBuf,
+    #[serde(default)]
+    headers: Vec<String>,
+    #[serde(default)]
+    template_path: PathBuf,
     rows: Vec<Document>,
+}
+
+fn column_index(headers: &[String], name: &str) -> Option<usize> {
+    headers.iter().position(|h| h.trim().eq_ignore_ascii_case(name))
+}
+fn template_filename(folder: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = fs::read_dir(folder).ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().and_then(|v| v.to_str())
+            .map(|s| s.eq_ignore_ascii_case("csv")).unwrap_or(false))
+        .collect();
+    candidates.sort_by_key(|p| p.file_name().unwrap_or_default().to_string_lossy().to_lowercase());
+    if let Some(f) = candidates.iter().find(|p| p.file_name().unwrap_or_default()
+        .to_string_lossy().eq_ignore_ascii_case("component_import.csv")) { return Some(f.clone()); }
+    if let Some(f) = candidates.iter().find(|p| p.file_name().unwrap_or_default()
+        .to_string_lossy().to_lowercase().starts_with("component_import")) { return Some(f.clone()); }
+    if let Some(f) = candidates.iter().find(|p| {
+        let n = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        n.contains("шаблон") || n.contains("template")
+    }) { return Some(f.clone()); }
+    if candidates.len() == 1 { return candidates.into_iter().next(); }
+    None
+}
+fn sniff_delimiter(raw: &[u8]) -> u8 {
+    let mut counts = [0usize; 3];
+    let mut quoted = false;
+    let mut i = 0;
+    while i < raw.len() {
+        let c = raw[i];
+        if c == b'"' {
+            if quoted && raw.get(i+1) == Some(&b'"') { i += 1; }
+            else { quoted = !quoted; }
+        } else if !quoted {
+            if c == b'\n' || c == b'\r' { break; }
+            match c { b';' => counts[0] += 1, b'\t' => counts[1] += 1, b',' => counts[2] += 1, _ => {} }
+        }
+        i += 1;
+    }
+    let winner = counts.iter().enumerate().max_by_key(|(i,c)| (**c, 2-*i)).unwrap().0;
+    [b';', b'\t', b','][winner]
+}
+fn read_template(path: &Path) -> Result<TemplateSpec,String> {
+    let raw = fs::read(path).map_err(|e| format!("Не удалось прочитать шаблон: {e}"))?;
+    let raw = raw.strip_prefix(&[0xEF,0xBB,0xBF]).unwrap_or(&raw);
+    std::str::from_utf8(raw).map_err(|e| format!("Шаблон должен быть UTF-8: {e}"))?;
+    let delimiter = sniff_delimiter(raw);
+    let mut reader = csv::ReaderBuilder::new().has_headers(false).delimiter(delimiter)
+        .flexible(true).from_reader(raw);
+    let mut records = reader.records();
+    let first = records.next().ok_or("В шаблоне отсутствует строка заголовков")?
+        .map_err(|e| format!("Ошибка чтения заголовков CSV: {e}"))?;
+    let headers: Vec<String> = first.iter().map(|s| s.trim().to_owned()).collect();
+    if headers.is_empty() || headers.len() > 128 || headers.iter().any(|s| s.is_empty()) {
+        return Err("Шаблон должен содержать от 1 до 128 непустых заголовков".into());
+    }
+    let mut seen = HashSet::new();
+    if headers.iter().any(|h| !seen.insert(h.to_lowercase())) {
+        return Err("В шаблоне есть повторяющиеся названия колонок".into());
+    }
+    if column_index(&headers, "Name").is_none() || column_index(&headers, "File").is_none() {
+        return Err("В CSV-шаблоне должны быть колонки Name и File".into());
+    }
+    let rows = records.map(|r| r.map_err(|e|e.to_string()))
+        .collect::<Result<Vec<_>,_>>()
+        .map_err(|e| format!("Ошибка чтения строк шаблона: {e}"))?;
+    let mut defaults = vec![String::new(); headers.len()];
+    let example = rows.len() == 1 && (
+        rows[0].iter().any(|v| v.trim().to_lowercase().starts_with("укажите "))
+        || column_index(&headers,"File").and_then(|i| rows[0].get(i))
+            .map(|v| v.eq_ignore_ascii_case("document.pdf")).unwrap_or(false)
+    );
+    if rows.len() == 1 {
+        for (idx,value) in rows[0].iter().take(defaults.len()).enumerate() {
+            if !example || headers[idx].eq_ignore_ascii_case("Regulatory") {
+                defaults[idx] = value.to_owned();
+            }
+        }
+    }
+    if let Some(idx) = column_index(&headers,"Name") { defaults[idx].clear(); }
+    if let Some(idx) = column_index(&headers,"File") { defaults[idx].clear(); }
+    Ok(TemplateSpec {path:path.to_path_buf(),headers,defaults,delimiter,example})
+}
+fn restore_project_rows(project: Project, template: &TemplateSpec) -> Vec<Document> {
+    project.rows.into_iter().filter_map(|mut doc| {
+        if project.headers.is_empty() {
+            if doc.fields.len() != template.headers.len() { return None; }
+        } else {
+            let previous = doc.fields;
+            doc.fields = template.headers.iter().enumerate().map(|(i,name)| {
+                project.headers.iter().position(|h| h.eq_ignore_ascii_case(name))
+                    .and_then(|old|previous.get(old).cloned())
+                    .unwrap_or_else(||template.defaults[i].clone())
+            }).collect();
+        }
+        Some(doc)
+    }).collect()
 }
 
 fn is_cyrillic(ch: char) -> bool {
