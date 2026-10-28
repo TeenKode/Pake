@@ -4,7 +4,7 @@ use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -159,15 +159,33 @@ fn scan(folder: &Path, executable: &Path) -> io::Result<Vec<Document>> {
     Ok(rows)
 }
 
+// The target importer's working example uses bare values for ordinary cells.
+// Quote only if required for valid semicolon-delimited CSV.
 fn quote_csv(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
+    if value.chars().any(|c| matches!(c, ';' | '"' | '\r' | '\n')) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
+}
+fn csv_field(index: usize, value: &str) -> String {
+    if index == 2 {
+        // Regulatory: canonical strings as in the successfully imported sample.
+        let canonical = match value.trim().to_lowercase().as_str() {
+            "да" | "yes" | "true" | "1" => "Да",
+            "нет" | "no" | "false" | "0" => "Нет",
+            _ => value,
+        };
+        return quote_csv(canonical);
+    }
+    quote_csv(value)
 }
 fn csv_bytes(rows: &[Document]) -> Vec<u8> {
     let mut csv = Vec::new();
     csv.extend_from_slice(HEADERS.join(";").as_bytes());
     csv.extend_from_slice(b"\r\n");
     for doc in rows.iter().filter(|row| row.included) {
-        let row = doc.fields.iter().map(|field| quote_csv(field)).collect::<Vec<_>>().join(";");
+        let row = doc.fields.iter().enumerate().map(|(i, field)| csv_field(i, field)).collect::<Vec<_>>().join(";");
         csv.extend_from_slice(row.as_bytes());
         csv.extend_from_slice(b"\r\n");
     }
@@ -228,8 +246,44 @@ fn make_zip(archive: &Path, folder: &Path, files: &[String]) -> io::Result<()> {
             zip.write_all(&buffer[..n])?;
         }
     }
-    zip.finish().map_err(io::Error::other)?;
+    let mut file = zip.finish().map_err(io::Error::other)?;
+    patch_zip_windows_metadata(&mut file)?;
     Ok(())
+}
+// Older ZIP importers can require Windows-style central-directory metadata,
+// as seen in the verified working ZIP. Only the ZIP metadata is modified.
+fn patch_zip_windows_metadata(file: &mut File) -> io::Result<()> {
+    let end = file.seek(SeekFrom::End(0))?;
+    let n = end.min(65_557) as usize;
+    file.seek(SeekFrom::End(-(n as i64)))?;
+    let mut tail = vec![0u8; n];
+    file.read_exact(&mut tail)?;
+    let eocd = tail.windows(4).rposition(|bytes| bytes == b"PK\x05\x06")
+        .ok_or_else(|| io::Error::other("ZIP end-of-central-directory not found"))?;
+    if eocd + 22 > n { return Err(io::Error::other("Incomplete ZIP footer")); }
+    let u16le = |offset: usize| u16::from_le_bytes([tail[offset], tail[offset+1]]);
+    let entries = u16le(eocd + 10) as usize;
+    let center = u32::from_le_bytes(tail[eocd+16..eocd+20].try_into().unwrap());
+    if entries == 65535 || center == u32::MAX { return Ok(()); } // ZIP64: leave unchanged
+    let mut at = center as u64;
+    for _ in 0..entries {
+        let mut header = [0u8; 46];
+        file.seek(SeekFrom::Start(at))?;
+        file.read_exact(&mut header)?;
+        if &header[..4] != b"PK\x01\x02" {
+            return Err(io::Error::other("Invalid ZIP central directory"));
+        }
+        // version-made-by: low byte is ZIP specification version, high byte is host OS
+        file.seek(SeekFrom::Start(at + 5))?;
+        file.write_all(&[0])?;  // 0 = MS-DOS / Windows
+        file.seek(SeekFrom::Start(at + 38))?;
+        file.write_all(&0x20u32.to_le_bytes())?;  // DOS archive attribute
+        let filename_len = u16::from_le_bytes([header[28], header[29]]) as u64;
+        let extra_len = u16::from_le_bytes([header[30], header[31]]) as u64;
+        let comment_len = u16::from_le_bytes([header[32], header[33]]) as u64;
+        at += 46 + filename_len + extra_len + comment_len;
+    }
+    file.flush()
 }
 fn export(folder: &Path, rows: &[Document]) -> Result<PathBuf, String> {
     validate_rows(rows)?;
@@ -344,6 +398,22 @@ mod tests {
         assert!(z.by_name("Prikaz-№1.pdf").is_ok());
         drop(z);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn exports_working_template_style_and_canonical_regulatory() {
+        let mut fields = std::array::from_fn(|_| String::new());
+        fields[0] = "РП Алгебра 10-11 класс".into();
+        fields[2] = "да".into();
+        fields[3] = "RP-Algebra-10-11-klass.pdf".into();
+        fields[5] = "Рабочие программы СОО".into();
+        fields[6] = "01.09.2026".into();
+        let rows = vec![Document {source: PathBuf::from("dummy.pdf"),fields,included:true}];
+        let csv = String::from_utf8(csv_bytes(&rows)).unwrap();
+        assert!(csv.starts_with("Name;Number;Regulatory;File;"));
+        assert!(csv.contains("РП Алгебра 10-11 класс;;Да;RP-Algebra-10-11-klass.pdf"));
+        assert!(!csv.contains("\"РП Алгебра 10-11 класс\""));
+        assert!(!csv.contains("\"\""));
+        assert_eq!(quote_csv("содержит;разделитель"), "\"содержит;разделитель\"");
     }
     #[test]
     fn reject_duplicate_filename_after_bulk_change() {
