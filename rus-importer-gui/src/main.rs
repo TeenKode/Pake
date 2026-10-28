@@ -151,7 +151,7 @@ fn scan(folder: &Path, executable: &Path) -> io::Result<Vec<Document>> {
             i += 1;
         };
         let mut fields = std::array::from_fn(|_| String::new());
-        fields[0] = clean_import_title(stem.trim());
+        fields[0] = stem.trim().to_owned();
         fields[2] = "Нет".to_owned();
         fields[3] = resulting_name;
         rows.push(Document { source, fields, included: true });
@@ -187,13 +187,6 @@ fn csv_field(index: usize, value: &str) -> String {
 fn is_bracket(c: char) -> bool {
     matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '（' | '）')
 }
-fn clean_import_title(value: &str) -> String {
-    if !value.chars().any(is_bracket) { return value.to_owned(); }
-    let stripped: String = value.chars()
-        .map(|ch| if is_bracket(ch) { ' ' } else { ch })
-        .collect();
-    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
-}
 fn clean_import_filename(value: &str) -> String {
     if !value.chars().any(is_bracket) { return value.to_owned(); }
     let (stem, extension) = name_parts(value);
@@ -218,8 +211,6 @@ fn clean_export_rows(rows: &mut [Document]) -> usize {
     let mut count = 0;
     let mut used = HashSet::new();
     for doc in rows.iter_mut().filter(|doc| doc.included) {
-        let title = clean_import_title(&doc.fields[0]);
-        if title != doc.fields[0] { doc.fields[0] = title; count += 1; }
         let base = clean_import_filename(&doc.fields[3]);
         let mut suffix = 1;
         let filename = loop {
@@ -511,18 +502,10 @@ mod tests {
         assert!(csv.contains(";Рабочая программа;;01.09.2026;01.09.2026;"));
     }
     #[test]
-    fn parentheses_cleanup_matches_accepted_import_archive() {
-        assert_eq!(
-            clean_import_title("РП Алгебра 10-11 класс (Базовый)"),
-            "РП Алгебра 10-11 класс Базовый"
-        );
+    fn parentheses_removed_only_from_file_names() {
         assert_eq!(
             clean_import_filename("RP-Algebra-10-11-klass-(Bazovyy).pdf"),
             "RP-Algebra-10-11-klass-Bazovyy.pdf"
-        );
-        assert_eq!(
-            clean_import_title("РП информатика 10-11 ((Базовый))"),
-            "РП информатика 10-11 Базовый"
         );
         assert_eq!(
             clean_import_filename("RP-informatika-10-11-((Bazovyy)).pdf"),
@@ -535,7 +518,7 @@ mod tests {
         assert_eq!(clean_import_filename("Normal-file.pdf"), "Normal-file.pdf");
     }
     #[test]
-    fn export_sanitizes_csv_and_pdf_names_without_modifying_sources() {
+    fn export_sanitizes_only_file_names_preserving_names_and_sources() {
         let root = std::env::temp_dir().join(format!("rus_importer_brackets_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -559,15 +542,33 @@ mod tests {
         let mut zip = zip::ZipArchive::new(File::open(zip_path).unwrap()).unwrap();
         let mut csv = String::new();
         zip.by_name("component_import.csv").unwrap().read_to_string(&mut csv).unwrap();
-        assert!(csv.contains("РП Алгебра 10 Базовый;;Да;RP-Algebra-10-Bazovyy.pdf;"));
+        assert!(csv.contains("РП Алгебра 10 (Базовый);;Да;RP-Algebra-10-Bazovyy.pdf;"));
         assert!(csv.contains("РП Алгебра 10 Базовый;;Да;RP-Algebra-10-Bazovyy_2.pdf;"));
-        assert!(!csv.contains('(') && !csv.contains(')'));
+        for line in csv.lines().skip(1) {
+            let fields: Vec<_> = line.split(';').collect();
+            assert!(fields.len() >= 4);
+            assert!(!fields[3].contains('(') && !fields[3].contains(')'));
+        }
         assert_eq!(zip.by_name("RP-Algebra-10-Bazovyy.pdf").unwrap().size(), 16);
         assert_eq!(zip.by_name("RP-Algebra-10-Bazovyy_2.pdf").unwrap().size(), 16);
         assert_eq!(fs::read(&source_a).unwrap(), b"unchanged file A");
         assert_eq!(fs::read(&source_b).unwrap(), b"unchanged file B");
         assert_eq!(rows[0].fields[0], "РП Алгебра 10 (Базовый)");
+        assert_eq!(rows[0].fields[3], "RP-Algebra-10-(Bazovyy).pdf");
         drop(zip);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn scan_keeps_parentheses_in_russian_name_but_strips_filename() {
+        let root = std::env::temp_dir().join(format!("rus_importer_scan_brackets_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("РП Математика (профильная).pdf");
+        fs::write(&source, b"pdf").unwrap();
+        let docs = scan(&root, &root.join("RusDocumentImporter.exe")).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].fields[0], "РП Математика (профильная)");
+        assert_eq!(docs[0].fields[3], "RP-Matematika-profilnaya.pdf");
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
