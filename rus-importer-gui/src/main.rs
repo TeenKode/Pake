@@ -267,7 +267,8 @@ fn safe_filename_part(raw: &str) -> String {
             result.push_str(latin);
         } else if character.is_ascii_alphanumeric() || character == '_' {
             result.push(character);
-        } else if character == '-' || !character.is_ascii_alphanumeric() {
+        } else {
+            // Replace every unsupported character with a single word separator.
             if !result.is_empty() && !result.ends_with('-') && !result.ends_with('_') {
                 result.push('-');
             }
@@ -642,7 +643,7 @@ mod tests {
         let mut csv = String::new();
         zip.by_name("component_import.csv").unwrap().read_to_string(&mut csv).unwrap();
         assert!(csv.contains(&format!("РП Алгебра (базовая)_2026 №1;{filename};")));
-        assert_eq!(zip.by_name(filename).unwrap().size(),16);
+        assert_eq!(zip.by_name(filename).unwrap().size(),17);
         assert_eq!(fs::read(&source).unwrap(),b"original document");
         assert_eq!(rows[0].fields[1],"РП_Алгебра+1(новая)!№.pdf");
         drop(zip);
