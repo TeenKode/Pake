@@ -12,6 +12,7 @@ on:
       - build/rus-importer-v6-dynamic-template-20261028
       - build/rus-importer-v6-1-safe-filenames-20261028
       - release/rus-document-importer-v6-2-20261028
+      - release/rus-document-importer-v6-3-staff-template-20261028
   workflow_dispatch:
 
 jobs:
@@ -60,7 +61,7 @@ jobs:
           $csv = $strict.GetString($raw)
           if (!$csv.StartsWith('Category;File;Name;Extra;Regulatory')) { throw 'Dynamic template CSV header mismatch' }
           if (!$csv.Contains('Положение об аттестации')) { throw 'Russian Name missing' }
-          if (!$csv.Contains('Локальные;Polozhenie-ob-attestatsii.pdf;Положение об аттестации;Школа;Да')) { throw 'Template defaults/column mapping failed' }
+          if (!$csv.Contains(';Polozhenie-ob-attestatsii.pdf;Положение об аттестации;;')) { throw 'Template defaults/column mapping failed' }
           if (!$csv.Contains('Polozhenie-ob-attestatsii.pdf')) { throw 'File transliteration missing' }
           if (!$csv.Contains('Primer-10-versiya.pdf;Пример №10 (версия)!')) { throw 'Special character sanitization / unchanged Russian Name failed' }
           $archive = Join-Path $dir 'Готовые.zip'
@@ -79,7 +80,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = '6.2.0'
+          $version = '6.3.0'
           $staging = Join-Path $env:RUNNER_TEMP ('RusDocumentImporter-' + $version)
           $exampleDir = Join-Path $staging 'examples'
           New-Item -ItemType Directory -Force -Path $exampleDir | Out-Null
@@ -97,14 +98,14 @@ jobs:
       - name: Upload publication-ready ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: RusDocumentImporter_6_2_Release_Portable
+          name: RusDocumentImporter_6_3_GenericTemplates_Portable
           path: |
-            RusDocumentImporter_6.2.0_Windows_x64_portable.zip
+            RusDocumentImporter_6.3.0_Windows_x64_portable.zip
             SHA256SUMS.txt
           if-no-files-found: error
       - name: Upload GUI EXE
         uses: actions/upload-artifact@v4
         with:
-          name: RusDocumentImporter_GUI_v6_2_Windows_x64
+          name: RusDocumentImporter_GUI_v6_3_Windows_x64
           path: rus-importer-gui/target/release/rus_document_importer_gui.exe
           if-no-files-found: error
