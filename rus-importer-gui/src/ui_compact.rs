@@ -113,6 +113,7 @@ pub(super) struct ImporterApp {
     dirty:bool,
     confirm_rescan:bool,
     pending_folder:Option<PathBuf>,
+    last_export:Option<PathBuf>,
 }
 impl ImporterApp {
     fn new(cc:&eframe::CreationContext<'_>)->Self{
@@ -121,10 +122,10 @@ impl ImporterApp {
         let folder=exe.parent().unwrap_or(Path::new(".")).to_path_buf();
         let mut app=Self {
             folder,template:None,rows:Vec::new(),filter:String::new(),only_included:false,
-            active_row:None,dark:false,full_columns:false,show_editor:true,
+            active_row:None,dark:false,full_columns:false,show_editor:false,
             show_bulk:false,bulk_column:0,bulk_value:String::new(),bulk_checked:false,
             undo_bulk:None,status:String::new(),error:false,dirty:false,
-            confirm_rescan:false,pending_folder:None,
+            confirm_rescan:false,pending_folder:None,last_export:None,
         };
         let folder=app.folder.clone();
         app.open_folder(folder);
@@ -134,29 +135,42 @@ impl ImporterApp {
     fn fail(&mut self,s:impl Into<String>){self.status=s.into();self.error=true;}
     fn open_folder(&mut self,folder:PathBuf){
         self.folder=folder.clone();self.template=None;self.rows.clear();self.active_row=None;
-        self.undo_bulk=None;self.dirty=false;
-        let project=load_project(&folder.join(PROJECT_NAME)).ok();
-        let from_project=project.as_ref().map(|p|p.template_path.clone())
-            .filter(|p|p.is_file() && p.parent()==Some(folder.as_path()));
+        self.undo_bulk=None;self.dirty=false;self.last_export=None;
+        let project_path=folder.join(PROJECT_NAME);
+        let project=if project_path.is_file() || folder.join(format!("{PROJECT_NAME}.bak")).is_file(){
+            match load_project(&project_path){
+                Ok(project)=>Some(project),
+                Err(e)=>{self.fail(format!("Не удалось открыть сохранённый проект: {e}"));return;}
+            }
+        }else{None};
+        let from_project=project.as_ref().and_then(|p|{
+            let name=p.template_path.file_name()?;
+            let local=folder.join(name);
+            local.is_file().then_some(local)
+        });
         let path=from_project.or_else(||template_filename(&folder));
         let Some(path)=path else{
-            self.fail("Положите CSV-шаблон рядом с документами или нажмите «Шаблон CSV».");
+            self.fail("Нужен CSV-шаблон в папке с документами. Нажмите «Шаблон CSV».");
             return;
         };
         self.open_template_path(path,project);
     }
     fn open_template_path(&mut self,path:PathBuf,project:Option<Project>){
         let new=match read_template(&path){Ok(t)=>t,Err(e)=>{self.fail(e);return;}};
+        let executable=std::env::current_exe().unwrap_or_default();
         let rows=match project {
             Some(p)=>{
-                let loaded=restore_project_rows(p,&new);
+                let mut loaded=restore_project_rows(p,&new);
+                relink_document_sources(&mut loaded,&self.folder);
                 if loaded.is_empty(){
-                    scan(&self.folder,&std::env::current_exe().unwrap_or_default(),&new)
-                        .unwrap_or_default()
+                    match scan(&self.folder,&executable,&new){
+                        Ok(rows)=>rows,Err(e)=>{self.fail(format!("Ошибка сканирования: {e}"));return;}
+                    }
                 } else {loaded}
             }
-            None=>scan(&self.folder,&std::env::current_exe().unwrap_or_default(),&new)
-                .unwrap_or_default(),
+            None=>match scan(&self.folder,&executable,&new){
+                Ok(rows)=>rows,Err(e)=>{self.fail(format!("Ошибка сканирования: {e}"));return;}
+            },
         };
         self.rows=rows;self.template=Some(new);
         self.active_row=None;self.bulk_column=0;self.filter.clear();
@@ -200,8 +214,10 @@ impl ImporterApp {
                     headers:template.headers,rows:self.rows.clone(),
                 };
                 let mut rows=restore_project_rows(old,&new);
-                let scanned=scan(&self.folder,&std::env::current_exe().unwrap_or_default(),&new)
-                    .unwrap_or_default();
+                relink_document_sources(&mut rows,&self.folder);
+                let scanned=match scan(&self.folder,&std::env::current_exe().unwrap_or_default(),&new){
+                    Ok(rows)=>rows,Err(e)=>{self.fail(format!("Ошибка сканирования: {e}"));return;}
+                };
                 // Preserve existing work; append documents that were newly added to the folder.
                 let known:HashSet<PathBuf>=rows.iter().map(|r|r.source.clone()).collect();
                 rows.extend(scanned.into_iter().filter(|r|!known.contains(&r.source)));
@@ -223,8 +239,11 @@ impl ImporterApp {
         let Some(template)=&self.template else{self.fail("Сначала загрузите CSV-шаблон.");return;};
         match export(&self.folder,&self.rows,template){
             Ok(path)=>{
-                let _=save_project(&self.folder,&self.rows,template);
-                self.dirty=false;self.info(format!("Архив создан: {}",path.display()));
+                self.last_export=Some(path.clone());
+                match save_project(&self.folder,&self.rows,template){
+                    Ok(_)=>{self.dirty=false;self.info(format!("Создан: {}",path.display()));}
+                    Err(e)=>{self.dirty=true;self.fail(format!("Архив создан, но проект не сохранён: {e}"));}
+                }
             }
             Err(e)=>self.fail(e),
         }
@@ -256,7 +275,7 @@ impl ImporterApp {
     fn toolbar(&mut self,ui:&mut egui::Ui){
         ui.horizontal(|ui|{
             ui.label(RichText::new("Импорт документов").size(18.0).strong().color(ink(self.dark)));
-            ui.label(RichText::new("v6.1").size(11.0).color(dim(self.dark)));
+            ui.label(RichText::new("v6.2").size(11.0).color(dim(self.dark)));
             ui.separator();
             if ui.add(button("Папка",self.dark)).clicked(){self.choose_folder();}
             if ui.add(button("Шаблон CSV",self.dark)).clicked(){self.choose_template();}
@@ -264,7 +283,21 @@ impl ImporterApp {
                 if self.dirty{self.confirm_rescan=true}else{self.refresh();}
             }
             ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{
-                if ui.add_enabled(self.template.is_some(),action("Создать CSV + ZIP")).clicked(){self.generate();}
+                if ui.add_enabled(self.template.is_some(),action("Создать ZIP")).clicked(){self.generate();}
+                if let Some(path)=self.last_export.clone(){
+                    if ui.add(button("Показать результат",self.dark)).clicked(){
+                        #[cfg(windows)]
+                        {
+                            if let Some(folder)=path.parent(){
+                                if let Err(e)=std::process::Command::new("explorer.exe").arg(folder).spawn(){
+                                    self.fail(format!("Не удалось открыть папку: {e}"));
+                                }
+                            }
+                        }
+                        #[cfg(not(windows))]
+                        {self.info(format!("Результат: {}",path.display()));}
+                    }
+                }
                 if ui.add_enabled(self.template.is_some(),button("Сохранить",self.dark)).clicked(){self.persist();}
                 if ui.add(button(if self.dark{"Светлая"}else{"Тёмная"},self.dark)).clicked(){
                     self.dark=!self.dark;apply_theme(ui.ctx(),self.dark);
@@ -485,6 +518,8 @@ impl eframe::App for ImporterApp {
     fn update(&mut self,ctx:&egui::Context,_frame:&mut eframe::Frame){
         if ctx.input(|i|i.modifiers.ctrl && i.key_pressed(egui::Key::S)){self.persist();}
         if ctx.input(|i|i.modifiers.ctrl && i.key_pressed(egui::Key::E)){self.generate();}
+        if ctx.input(|i|i.modifiers.ctrl && i.key_pressed(egui::Key::O)){self.choose_folder();}
+        if ctx.input(|i|i.key_pressed(egui::Key::F5)){if self.dirty{self.confirm_rescan=true;}else{self.refresh();}}
         egui::TopBottomPanel::top("v6_toolbar")
             .frame(Frame::new().fill(surface(self.dark)).inner_margin(Margin::symmetric(12,7)))
             .show(ctx,|ui|self.toolbar(ui));
