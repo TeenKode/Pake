@@ -41,26 +41,52 @@ struct Project {
 fn column_index(headers: &[String], name: &str) -> Option<usize> {
     headers.iter().position(|h| h.trim().eq_ignore_ascii_case(name))
 }
-fn template_filename(folder: &Path) -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = fs::read_dir(folder).ok()?
-        .flatten()
-        .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .map(|entry| entry.path())
-        .filter(|p| p.extension().and_then(|v| v.to_str())
-            .map(|s| s.eq_ignore_ascii_case("csv")).unwrap_or(false))
-        .collect();
-    candidates.sort_by_key(|p| p.file_name().unwrap_or_default().to_string_lossy().to_lowercase());
-    if let Some(f) = candidates.iter().find(|p| p.file_name().unwrap_or_default()
-        .to_string_lossy().eq_ignore_ascii_case("component_import.csv")) { return Some(f.clone()); }
-    if let Some(f) = candidates.iter().find(|p| p.file_name().unwrap_or_default()
-        .to_string_lossy().to_lowercase().starts_with("component_import")) { return Some(f.clone()); }
-    if let Some(f) = candidates.iter().find(|p| {
-        let n = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-        n.contains("шаблон") || n.contains("template")
-    }) { return Some(f.clone()); }
-    if candidates.len() == 1 { return candidates.into_iter().next(); }
-    None
+/// Discover candidate templates by content and extension, not by a specific filename.
+/// Multiple candidates must be selected explicitly in the GUI.
+fn template_candidates(folder: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = fs::read_dir(folder).map_err(|e| format!("Не удалось открыть папку: {e}"))?;
+    let mut csv_files = Vec::new();
+    let mut other_text = Vec::new();
+    let mut excel_files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Ошибка чтения папки: {e}"))?;
+        if !entry.file_type().map(|t|t.is_file()).unwrap_or(false) { continue; }
+        let path = entry.path();
+        let ext = path.extension().and_then(|e|e.to_str()).unwrap_or("").to_ascii_lowercase();
+        match ext.as_str() {
+            "csv" => csv_files.push(path),
+            "tsv" | "txt" => other_text.push(path),
+            "xlsx" | "xls" | "ods" => excel_files.push(path),
+            _ => {}
+        }
+    }
+    csv_files.sort_by_key(|p|p.file_name().unwrap_or_default().to_string_lossy().to_lowercase());
+    other_text.sort_by_key(|p|p.file_name().unwrap_or_default().to_string_lossy().to_lowercase());
+    // .txt files count as templates only when they have the required Name/File headers.
+    csv_files.extend(other_text.into_iter().filter(|p|read_template(p).is_ok()));
+    if csv_files.is_empty() && !excel_files.is_empty() {
+        return Err(format!(
+            "В папке найден шаблон Excel ({}), но нужен CSV. В Excel: Файл → Сохранить как → CSV UTF-8.",
+            excel_files[0].file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+    if csv_files.is_empty() {
+        return Err("CSV-шаблон не найден. Положите CSV с колонками Name и File рядом с документами или выберите его через «Шаблон CSV».".to_owned());
+    }
+    Ok(csv_files)
 }
+fn template_filename(folder: &Path) -> Option<PathBuf> {
+    let candidates = template_candidates(folder).ok()?;
+    candidates.iter().filter(|path|read_template(path).is_ok())
+        .min_by_key(|p| {
+            let n=p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+            if n=="component_import.csv" {0}
+            else if n.starts_with("component_import") {1}
+            else if n.contains("шаблон") || n.contains("template") {2}
+            else {3}
+        }).cloned().or_else(||candidates.into_iter().next())
+}
+
 fn sniff_delimiter(raw: &[u8]) -> u8 {
     let mut counts = [0usize; 3];
     let mut quoted = false;
@@ -701,6 +727,29 @@ mod tests {
         save_project(&folder,&rows,&template).unwrap();
         let restored=load_project(&folder.join(PROJECT_NAME)).unwrap();
         assert_eq!(restored.rows[0].fields[2],"Изменённое значение");
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn detects_any_csv_name_and_reports_multiple_templates() {
+        let folder=sandbox("templates_any_name");
+        fs::write(folder.join("Импорт новых документов.csv"),"File;Name;Category\n").unwrap();
+        fs::write(folder.join("another_template.csv"),"Name;File\n").unwrap();
+        fs::write(folder.join("notes.txt"),"Это просто заметки").unwrap();
+        let found=template_candidates(&folder).unwrap();
+        assert_eq!(found.len(),2);
+        assert!(found.iter().any(|p|p.file_name().unwrap()=="Импорт новых документов.csv"));
+        assert!(found.iter().any(|p|p.file_name().unwrap()=="another_template.csv"));
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn detects_valid_tsv_template_and_explains_excel_file() {
+        let folder=sandbox("templates_ext");
+        fs::write(folder.join("формат.tsv"),"Name\tFile\tOther\n").unwrap();
+        assert_eq!(template_candidates(&folder).unwrap().len(),1);
+        fs::remove_file(folder.join("формат.tsv")).unwrap();
+        fs::write(folder.join("новый шаблон.xlsx"),b"not CSV").unwrap();
+        let err=template_candidates(&folder).unwrap_err();
+        assert!(err.contains("Excel"),"{err}");
         fs::remove_dir_all(folder).unwrap();
     }
     #[test]
