@@ -84,8 +84,8 @@ fn setup_fonts(ctx:&egui::Context){
 }
 fn prime_columns(t:&TemplateSpec)->Vec<usize>{
     let mut indices=Vec::new();
-    for key in ["Name","File","Category","Regulatory","Description"] {
-        if let Some(i)=column_index(&t.headers,key){if !indices.contains(&i){indices.push(i);}}
+    for idx in [t.title_column,t.asset_column].into_iter().flatten(){
+        if !indices.contains(&idx){indices.push(idx);}
     }
     for i in 0..t.headers.len(){
         if indices.len()>=5{break;}
@@ -116,6 +116,7 @@ pub(super) struct ImporterApp {
     last_export:Option<PathBuf>,
     template_options:Vec<PathBuf>,
     pending_project:Option<Project>,
+    show_mapping:bool,
 }
 impl ImporterApp {
     fn new(cc:&eframe::CreationContext<'_>)->Self{
@@ -128,7 +129,7 @@ impl ImporterApp {
             show_bulk:false,bulk_column:0,bulk_value:String::new(),bulk_checked:false,
             undo_bulk:None,status:String::new(),error:false,dirty:false,
             confirm_rescan:false,pending_folder:None,last_export:None,
-            template_options:Vec::new(),pending_project:None,
+            template_options:Vec::new(),pending_project:None,show_mapping:false,
         };
         let folder=app.folder.clone();
         app.open_folder(folder);
@@ -162,7 +163,8 @@ impl ImporterApp {
         self.open_template_path(options[0].clone(),project);
     }
     fn open_template_path(&mut self,path:PathBuf,project:Option<Project>){
-        let new=match read_template(&path){Ok(t)=>t,Err(e)=>{self.fail(e);return;}};
+        let mut new=match read_template(&path){Ok(t)=>t,Err(e)=>{self.fail(e);return;}};
+        if let Some(project)=&project{apply_project_mapping(project,&mut new);}
         self.template_options.clear();self.pending_project=None;
         let executable=std::env::current_exe().unwrap_or_default();
         let rows=match project {
@@ -170,13 +172,21 @@ impl ImporterApp {
                 let mut loaded=restore_project_rows(p,&new);
                 relink_document_sources(&mut loaded,&self.folder);
                 if loaded.is_empty(){
-                    match scan(&self.folder,&executable,&new){
+                    loaded=rows_from_template(&new);
+                    let scanned=match scan(&self.folder,&executable,&new){
                         Ok(rows)=>rows,Err(e)=>{self.fail(format!("Ошибка сканирования: {e}"));return;}
-                    }
-                } else {loaded}
+                    };
+                    loaded.extend(scanned);
+                }
+                loaded
             }
-            None=>match scan(&self.folder,&executable,&new){
-                Ok(rows)=>rows,Err(e)=>{self.fail(format!("Ошибка сканирования: {e}"));return;}
+            None=>{
+                let mut loaded=rows_from_template(&new);
+                let scanned=match scan(&self.folder,&executable,&new){
+                    Ok(rows)=>rows,Err(e)=>{self.fail(format!("Ошибка сканирования: {e}"));return;}
+                };
+                loaded.extend(scanned);
+                loaded
             },
         };
         self.rows=rows;self.template=Some(new);
@@ -205,6 +215,8 @@ impl ImporterApp {
                 Some(Project {
                     version:2,folder:self.folder.clone(),template_path:previous.path.clone(),
                     headers:previous.headers.clone(),rows:self.rows.clone(),
+                    title_field:previous.title_column.and_then(|i|previous.headers.get(i).cloned()),
+                    asset_field:previous.asset_column.and_then(|i|previous.headers.get(i).cloned()),
                 })
             } else {None};
             self.open_template_path(path,project);
@@ -218,15 +230,19 @@ impl ImporterApp {
             Ok(new)=>{
                 let old=Project {
                     version:2,folder:self.folder.clone(),template_path:template.path,
+                    title_field:template.title_column.and_then(|i|template.headers.get(i).cloned()),
+                    asset_field:template.asset_column.and_then(|i|template.headers.get(i).cloned()),
                     headers:template.headers,rows:self.rows.clone(),
                 };
+                apply_project_mapping(&old,&mut new);
                 let mut rows=restore_project_rows(old,&new);
                 relink_document_sources(&mut rows,&self.folder);
                 let scanned=match scan(&self.folder,&std::env::current_exe().unwrap_or_default(),&new){
                     Ok(rows)=>rows,Err(e)=>{self.fail(format!("Ошибка сканирования: {e}"));return;}
                 };
                 // Preserve existing work; append documents that were newly added to the folder.
-                let known:HashSet<PathBuf>=rows.iter().map(|r|r.source.clone()).collect();
+                let known:HashSet<PathBuf>=rows.iter().filter(|r|!r.source.as_os_str().is_empty())
+                    .map(|r|r.source.clone()).collect();
                 rows.extend(scanned.into_iter().filter(|r|!known.contains(&r.source)));
                 self.rows=rows;self.template=Some(new);self.active_row=None;
                 self.dirty=true;self.undo_bulk=None;
@@ -255,6 +271,102 @@ impl ImporterApp {
             Err(e)=>self.fail(e),
         }
     }
+    fn choose_project(&mut self){
+        if let Some(path)=rfd::FileDialog::new().set_directory(&self.folder)
+            .add_filter("Проект JSON",&["json","bak"]).pick_file(){
+            match load_project(&path){
+                Ok(project)=>{
+                    let folder=path.parent().unwrap_or(Path::new(".")).to_path_buf();
+                    self.folder=folder.clone();
+                    self.template=None;self.rows.clear();
+                    let preferred=project.template_path.file_name()
+                        .map(|n|folder.join(n)).filter(|p|p.is_file());
+                    let next=preferred.or_else(||template_filename(&folder));
+                    if let Some(template)=next{
+                        self.open_template_path(template,Some(project));
+                        self.info("Проект загружен.");
+                    }else{
+                        self.fail("Данные проекта прочитаны, но CSV-шаблон рядом не найден. Скопируйте его в эту папку.");
+                    }
+                }
+                Err(e)=>self.fail(format!("Ошибка открытия проекта: {e}"))
+            }
+        }
+    }
+    fn add_blank_row(&mut self){
+        let Some(t)=&self.template else{return;};
+        self.rows.push(Document{source:PathBuf::new(),fields:vec![String::new();t.headers.len()],included:true});
+        self.active_row=Some(self.rows.len()-1);self.dirty=true;self.show_editor=true;
+    }
+    fn delete_selected(&mut self){
+        if let Some(idx)=self.active_row{
+            if idx<self.rows.len(){self.rows.remove(idx);self.dirty=true;}
+            self.active_row=None;
+        }
+    }
+    fn add_files(&mut self){
+        let Some(t)=self.template.clone() else{return;};
+        let Some(asset)=t.asset_column else{
+            self.show_mapping=true;
+            self.fail("Сначала выберите колонку для имени вложения в «Колонки файлов».");
+            return;
+        };
+        let files=rfd::FileDialog::new().set_directory(&self.folder).pick_files();
+        let Some(files)=files else{return;};
+        let mut used:HashSet<String>=self.rows.iter().filter(|r|!r.source.as_os_str().is_empty())
+            .filter_map(|r|r.fields.get(asset)).map(|v|v.to_lowercase()).collect();
+        let mut count=0;
+        for source in files{
+            if !source.is_file() || self.rows.iter().any(|r|r.source==source){continue;}
+            let file=source.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let mut fields=vec![String::new();t.headers.len()];
+            if let Some(title)=t.title_column{
+                fields[title]=name_parts(&file).0.to_owned();
+            }
+            let base=clean_import_filename(&file);
+            let mut counter=1;
+            loop{
+                let filename=number_suffix(&base,counter);
+                if used.insert(filename.to_lowercase()){
+                    fields[asset]=filename;
+                    break;
+                }
+                counter+=1;
+            }
+            self.rows.push(Document{source,fields,included:true});count+=1;
+        }
+        if count>0{self.dirty=true;}
+        self.info(format!("Добавлено файлов: {count}"));
+    }
+    fn mapping_bar(&mut self,ui:&mut egui::Ui){
+        if !self.show_mapping{return;}
+        let Some(t)=self.template.as_mut() else{return;};
+        let headers=t.headers.clone();
+        ui.horizontal(|ui|{
+            ui.label(RichText::new("Название:").color(dim(self.dark)));
+            egui::ComboBox::from_id_salt("title_role")
+                .selected_text(t.title_column.and_then(|i|headers.get(i))
+                    .map(String::as_str).unwrap_or("Не назначено"))
+                .width(155.0).show_ui(ui,|ui|{
+                    ui.selectable_value(&mut t.title_column,None,"Не назначено");
+                    for (i,label) in headers.iter().enumerate(){
+                        ui.selectable_value(&mut t.title_column,Some(i),label);
+                    }
+                });
+            ui.label(RichText::new("Имя вложения:").color(dim(self.dark)));
+            egui::ComboBox::from_id_salt("asset_role")
+                .selected_text(t.asset_column.and_then(|i|headers.get(i))
+                    .map(String::as_str).unwrap_or("Не назначено"))
+                .width(155.0).show_ui(ui,|ui|{
+                    ui.selectable_value(&mut t.asset_column,None,"Не назначено");
+                    for (i,label) in headers.iter().enumerate(){
+                        ui.selectable_value(&mut t.asset_column,Some(i),label);
+                    }
+                });
+            ui.label(RichText::new("Назначение необязательно для CSV без вложений.").size(11.0)
+                .color(dim(self.dark)));
+        });
+    }
     fn bulk_apply(&mut self,clear:bool){
         let Some(template)=&self.template else{return;};
         if self.bulk_column>=template.headers.len(){return;}
@@ -282,10 +394,11 @@ impl ImporterApp {
     fn toolbar(&mut self,ui:&mut egui::Ui){
         ui.horizontal(|ui|{
             ui.label(RichText::new("Импорт документов").size(18.0).strong().color(ink(self.dark)));
-            ui.label(RichText::new("v6.2").size(11.0).color(dim(self.dark)));
+            ui.label(RichText::new("v6.3").size(11.0).color(dim(self.dark)));
             ui.separator();
             if ui.add(button("Папка",self.dark)).clicked(){self.choose_folder();}
             if ui.add(button("Шаблон CSV",self.dark)).clicked(){self.choose_template();}
+            if ui.add(button("Открыть проект",self.dark)).clicked(){self.choose_project();}
             if ui.add(button("Обновить",self.dark)).clicked(){
                 if self.dirty{self.confirm_rescan=true}else{self.refresh();}
             }
@@ -305,7 +418,7 @@ impl ImporterApp {
                         {self.info(format!("Результат: {}",path.display()));}
                     }
                 }
-                if ui.add_enabled(self.template.is_some(),button("Сохранить",self.dark)).clicked(){self.persist();}
+                if ui.add_enabled(self.template.is_some(),button("Сохранить проект",self.dark)).clicked(){self.persist();}
                 if ui.add(button(if self.dark{"Светлая"}else{"Тёмная"},self.dark)).clicked(){
                     self.dark=!self.dark;apply_theme(ui.ctx(),self.dark);
                 }
@@ -319,10 +432,10 @@ impl ImporterApp {
                     t.path.file_name().unwrap_or_default().to_string_lossy(),t.headers.len()))
                     .size(11.0).color(dim(self.dark)));
             } else {
-                ui.colored_label(BAD,"Шаблон не найден");
+                ui.colored_label(BAD,"Нет шаблона");
             }
             ui.separator();
-            ui.label(RichText::new(format!("Файлов: {} / {}",self.rows.iter()
+            ui.label(RichText::new(format!("Строк: {} / {}",self.rows.iter()
                 .filter(|r|r.included).count(),self.rows.len())).size(11.0).color(dim(self.dark)));
             if self.dirty{ui.colored_label(BAD,"Не сохранено");}
         });
@@ -361,7 +474,13 @@ impl ImporterApp {
             if ui.add(button("Снять",self.dark)).clicked(){
                 for row in &mut self.rows{row.included=false;}self.dirty=true;
             }
+            if ui.add_enabled(self.template.is_some(),button("+ Строка",self.dark)).clicked(){self.add_blank_row();}
+            if ui.add_enabled(self.template.is_some(),button("+ Файлы",self.dark)).clicked(){self.add_files();}
+            if ui.add_enabled(self.active_row.is_some(),button("Удалить",self.dark)).clicked(){self.delete_selected();}
             ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{
+                if ui.add(button(if self.show_mapping{"Скрыть назначение"}else{"Колонки файлов"},self.dark)).clicked(){
+                    self.show_mapping=!self.show_mapping;
+                }
                 if ui.add(button(if self.show_editor{"Скрыть поля"}else{"Поля справа"},self.dark)).clicked(){
                     self.show_editor=!self.show_editor;
                 }
@@ -375,7 +494,7 @@ impl ImporterApp {
         let Some(template)=&self.template else{
             ui.add_space(18.0);
             ui.heading("Не найден CSV-шаблон");
-            ui.label("Положите component_import.csv рядом с документами или выберите файл CSV кнопкой сверху.");
+            ui.label("Выберите любой CSV-шаблон. Названия колонок могут быть произвольными.");
             return;
         };
         let visible=self.filtered();
@@ -444,7 +563,7 @@ impl ImporterApp {
         };
         if index>=self.rows.len(){self.active_row=None;return;}
         let fields=template.headers.clone();
-        let file_idx=column_index(&fields,"File");
+        let file_idx=template.asset_column;
         ui.label(RichText::new(self.rows[index].source.file_name().unwrap_or_default()
             .to_string_lossy().to_string()).size(11.0).color(dim(self.dark)));
         ui.separator();
@@ -464,7 +583,7 @@ impl ImporterApp {
                 }
                 if file_idx==Some(col){
                     if ui.small_button("Сделать имя из названия").clicked(){
-                        if let Some(name_idx)=column_index(&fields,"Name"){
+                        if let Some(name_idx)=template.title_column{
                             let stem=self.rows[index].fields[name_idx].clone();
                             let ext=self.rows[index].source.extension()
                                 .and_then(|x|x.to_str()).unwrap_or("");
@@ -483,7 +602,7 @@ impl ImporterApp {
             let color=if self.error{BAD}else{if self.dark{GOOD}else{Color32::from_rgb(19,119,91)}};
             ui.label(RichText::new(&self.status).size(11.0).color(color));
             ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{
-                ui.label(RichText::new("UTF-8 · структура из CSV-шаблона · Ctrl+S / Ctrl+E")
+                ui.label(RichText::new("CSV без BOM · Ctrl+S сохранить · Ctrl+E экспорт")
                     .size(11.0).color(dim(self.dark)));
             });
         });
@@ -558,6 +677,11 @@ impl eframe::App for ImporterApp {
         egui::TopBottomPanel::top("v6_bulk")
             .frame(Frame::new().fill(surface(self.dark)).inner_margin(Margin::symmetric(12,3)))
             .show(ctx,|ui|self.bulk_bar(ui));
+        if self.show_mapping{
+            egui::TopBottomPanel::top("v6_mapping")
+                .frame(Frame::new().fill(surface(self.dark)).inner_margin(Margin::symmetric(12,3)))
+                .show(ctx,|ui|self.mapping_bar(ui));
+        }
         egui::TopBottomPanel::bottom("v6_status")
             .frame(Frame::new().fill(surface(self.dark)).inner_margin(Margin::symmetric(12,5)))
             .show(ctx,|ui|self.footer(ui));
