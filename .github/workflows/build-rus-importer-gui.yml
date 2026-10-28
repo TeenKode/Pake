@@ -9,6 +9,7 @@ on:
       - build/rus-importer-v5-2-required-fields-20261028
       - build/rus-importer-v5-3-no-brackets-20261028
       - build/rus-importer-v5-4-file-only-brackets-20261028
+      - build/rus-importer-v6-dynamic-template-20261028
   workflow_dispatch:
 
 jobs:
@@ -42,6 +43,7 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'rus-gui-smoke'
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
           [IO.File]::WriteAllText((Join-Path $dir 'Положение об аттестации.pdf'), 'sample')
+          [IO.File]::WriteAllText((Join-Path $dir 'component_import.csv'), 'Category;File;Name;Extra;Regulatory' + "`r`n" + 'Локальные;sample.pdf;Тест;Школа;да')
           $run = Start-Process -FilePath $bin -ArgumentList @('--smoke-test-folder', ('"' + $dir + '"')) -Wait -PassThru
           if ($run.ExitCode -ne 0) { throw "Program exited with $($run.ExitCode)" }
           if (!(Test-Path (Join-Path $dir 'Готовые/Polozhenie-ob-attestatsii.pdf'))) { throw 'Missing transliterated PDF' }
@@ -51,8 +53,9 @@ jobs:
           if ($raw.Length -ge 3 -and $raw[0] -eq 0xEF -and $raw[1] -eq 0xBB -and $raw[2] -eq 0xBF) { throw 'CSV has BOM' }
           $strict = [Text.UTF8Encoding]::new($false,$true)
           $csv = $strict.GetString($raw)
-          if (!$csv.StartsWith('Name;Number;Regulatory;File;')) { throw 'CSV header mismatch' }
+          if (!$csv.StartsWith('Category;File;Name;Extra;Regulatory')) { throw 'Dynamic template CSV header mismatch' }
           if (!$csv.Contains('Положение об аттестации')) { throw 'Russian Name missing' }
+          if (!$csv.Contains('Локальные;Polozhenie-ob-attestatsii.pdf;Положение об аттестации;Школа;Да')) { throw 'Template defaults/column mapping failed' }
           if (!$csv.Contains('Polozhenie-ob-attestatsii.pdf')) { throw 'File transliteration missing' }
           $archive = Join-Path $dir 'Готовые.zip'
           if (!(Test-Path $archive)) { throw 'ZIP missing' }
@@ -69,6 +72,6 @@ jobs:
       - name: Upload GUI EXE
         uses: actions/upload-artifact@v4
         with:
-          name: RusDocumentImporter_GUI_v5_4_FilenameOnly_Windows_x64
+          name: RusDocumentImporter_GUI_v6_DynamicTemplate_Windows_x64
           path: rus-importer-gui/target/release/rus_document_importer_gui.exe
           if-no-files-found: error
