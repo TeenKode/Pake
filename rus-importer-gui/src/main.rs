@@ -573,14 +573,15 @@ mod tests {
         assert_eq!(rows.len(),1);
         assert_eq!(rows[0].fields[2],"Приказ (новый)");
         assert_eq!(rows[0].fields[1],"Prikaz-novyy.pdf");
-        assert_eq!(rows[0].fields[0],"Локальные");
-        assert_eq!(rows[0].fields[3],"Школа");
+        assert_eq!(rows[0].fields[0],"");
+        assert_eq!(rows[0].fields[3],"");
+        assert_eq!(template.example_rows[0][3],"Школа");
         let archive=export(&folder,&rows,&template).unwrap();
         let mut zip=zip::ZipArchive::new(File::open(archive).unwrap()).unwrap();
         let mut csv=String::new();
         zip.by_name("component_import.csv").unwrap().read_to_string(&mut csv).unwrap();
         assert!(csv.starts_with("Category;File;Name;Extra;Regulatory\r\n"));
-        assert!(csv.contains("Локальные;Prikaz-novyy.pdf;Приказ (новый);Школа;Да\r\n"));
+        assert!(csv.contains(";Prikaz-novyy.pdf;Приказ (новый);;\r\n"));
         assert!(zip.by_name("Prikaz-novyy.pdf").is_ok());
         drop(zip);fs::remove_dir_all(folder).unwrap();
     }
@@ -609,7 +610,10 @@ mod tests {
         assert!(template.example);
         assert_eq!(template.defaults[3],"");
         assert_eq!(template.defaults[4],"");
-        assert_eq!(template.defaults[1],"Да");
+        assert_eq!(template.defaults[1],"");
+        assert_eq!(template.example_rows[0][1],"Да");
+        assert_eq!(rows_from_template(&template).len(),1);
+        assert!(!rows_from_template(&template)[0].included);
         assert_eq!(template_filename(&folder).unwrap(),path);
         fs::remove_dir_all(folder).unwrap();
     }
@@ -621,12 +625,14 @@ mod tests {
             rows:vec![Document {
                 source:PathBuf::from("sample.pdf"),fields:vec!["Имя".into(),"a.pdf".into(),"сохранено".into()],
                 included:true,
-            }]
+            }],
+            title_field:Some("Name".into()),asset_field:Some("File".into()),
         };
         let template=TemplateSpec {
             path:PathBuf::from("new.csv"),
             headers:vec!["Extra".into(),"File".into(),"Name".into(),"NewColumn".into()],
             defaults:vec![String::new();4],delimiter:b';',example:false,
+            title_column:Some(2),asset_column:Some(1),example_rows:vec![],
         };
         let rows=restore_project_rows(old,&template);
         assert_eq!(rows[0].fields,vec!["сохранено","a.pdf","Имя",""]);
@@ -760,10 +766,58 @@ mod tests {
         fs::remove_dir_all(folder).unwrap();
     }
     #[test]
+    fn arbitrary_columns_and_csv_only_export_are_supported() {
+        let root=sandbox("arbitrary_38");
+        let headers=(0..38).map(|i|format!("Column_{i}")).collect::<Vec<_>>();
+        let header_line=headers.join(";");
+        let data=(0..38).map(|i|format!("Value_{i}")).collect::<Vec<_>>().join(";");
+        let path=root.join("any_kind_of_template.csv");
+        fs::write(&path,format!("{header_line}\r\n{data}\r\n")).unwrap();
+        let template=read_template(&path).unwrap();
+        assert_eq!(template.headers.len(),38);
+        assert_eq!(template.title_column,None);
+        assert_eq!(template.asset_column,None);
+        let mut rows=rows_from_template(&template);
+        assert!(!rows[0].included);
+        rows[0].included=true;
+        let archive=export(&root,&rows,&template).unwrap();
+        let mut zip=zip::ZipArchive::new(File::open(archive).unwrap()).unwrap();
+        assert_eq!(zip.len(),1);
+        let mut actual=String::new();
+        zip.by_name("component_import.csv").unwrap().read_to_string(&mut actual).unwrap();
+        assert_eq!(actual,format!("{header_line}\r\n{data}\r\n"));
+        drop(zip);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn image_style_template_can_read_38_columns_without_required_file_name() {
+        let root=sandbox("employee");
+        let mut headers=vec!["Name".to_owned(),"Image".to_owned()];
+        headers.extend((2..38).map(|i|format!("StaffInfo{i}")));
+        let path=root.join("component_import (6).csv");
+        let mut data=vec!["Иванов Иван".to_owned(),"ivanov.jpg".to_owned()];
+        data.extend((2..38).map(|i|format!("value_{i}")));
+        fs::write(&path,format!("{}\r\n{}\r\n",headers.join(";"),data.join(";"))).unwrap();
+        let t=read_template(&path).unwrap();
+        assert_eq!(t.headers.len(),38);
+        assert_eq!(t.asset_column,Some(1));
+        assert_eq!(t.title_column,Some(0));
+        let samples=rows_from_template(&t);
+        assert_eq!(samples.len(),1);
+        assert!(!samples[0].included);
+        assert_eq!(samples[0].fields[1],"ivanov.jpg");
+        fs::write(root.join("Фото (новое).jpg"),b"JPG").unwrap();
+        let found=scan(&root,&root.join("app.exe"),&t).unwrap();
+        assert_eq!(found.len(),1);
+        assert_eq!(found[0].fields[1],"Foto-novoe.jpg");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn quotes_only_fields_that_require_it() {
         let template=TemplateSpec {
             path:PathBuf::from("a.csv"),headers:vec!["Name".into(),"File".into(),"Extra".into()],
             defaults:vec![String::new();3],delimiter:b';',example:false,
+            title_column:Some(0),asset_column:Some(1),example_rows:vec![],
         };
         let document=Document {
             source:PathBuf::new(),included:true,
