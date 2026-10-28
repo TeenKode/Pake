@@ -228,7 +228,7 @@ impl ImporterApp {
             self.open_folder(self.folder.clone());return;
         };
         match read_template(&template.path){
-            Ok(new)=>{
+            Ok(mut new)=>{
                 let old=Project {
                     version:2,folder:self.folder.clone(),template_path:template.path,
                     title_field:template.title_column.and_then(|i|template.headers.get(i).cloned()),
