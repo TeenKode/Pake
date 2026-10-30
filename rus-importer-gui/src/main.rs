@@ -326,6 +326,84 @@ fn clean_import_filename(value: &str) -> String {
     }
 }
 
+/// Read a pasted Excel/LibreOffice range using the standard TSV clipboard
+/// representation. Quoted cells may contain tabs and line breaks.
+fn parse_spreadsheet_paste(text: &str) -> Result<Option<Vec<Vec<String>>>,String> {
+    if !text.contains('\t') && !text.contains('\n') && !text.contains('\r') {
+        return Ok(None); // Keep ordinary one-cell paste in the native text editor.
+    }
+    if text.len() > 4_000_000 {
+        return Err("Слишком большой буфер вставки (больше 4 МБ)".into());
+    }
+    let mut reader=csv::ReaderBuilder::new().has_headers(false)
+        .delimiter(b'\t').flexible(true).from_reader(text.as_bytes());
+    let mut records=Vec::new();
+    for result in reader.records(){
+        let record=result.map_err(|e|format!("Ошибка при чтении таблицы из буфера: {e}"))?;
+        if records.len() >= 10000 {
+            return Err("Можно вставить не более 10 000 строк за один раз".into());
+        }
+        if record.len() > 128 {
+            return Err("Можно вставить не более 128 столбцов за один раз".into());
+        }
+        records.push(record.iter().map(ToOwned::to_owned).collect::<Vec<_>>());
+    }
+    if records.is_empty() || (records.len()==1 && records[0].len()==1) {
+        return Ok(None);
+    }
+    Ok(Some(records))
+}
+
+#[derive(Debug,Default,PartialEq,Eq)]
+struct PasteSummary {
+    rows_affected:usize,
+    created:usize,
+    cells_written:usize,
+    cells_outside_view:usize,
+}
+
+/// Apply clipboard cells to the displayed column order. Hidden fields are
+/// untouched even when the pasted range spans across them.
+fn apply_spreadsheet_paste(
+    rows:&mut Vec<Document>, column_count:usize, visible_columns:&[usize],
+    start_row:usize, start_column:usize, records:&[Vec<String>],
+) -> PasteSummary {
+    let mut summary=PasteSummary::default();
+    let Some(start_index)=visible_columns.iter().position(|&c|c==start_column) else{
+        return summary;
+    };
+    if column_count==0 || start_row>rows.len() || records.is_empty() {return summary;}
+    for (offset,record) in records.iter().enumerate(){
+        let target=start_row+offset;
+        while rows.len()<=target {
+            rows.push(Document {
+                source:PathBuf::new(),
+                fields:vec![String::new();column_count],
+                included:true,
+            });
+            summary.created+=1;
+        }
+        let row=&mut rows[target];
+        let mut wrote=false;
+        for (col_offset,value) in record.iter().enumerate(){
+            if let Some(&col)=visible_columns.get(start_index+col_offset){
+                if let Some(field)=row.fields.get_mut(col){
+                    *field=value.clone();
+                    summary.cells_written+=1;
+                    wrote=true;
+                }
+            }else{
+                summary.cells_outside_view+=1;
+            }
+        }
+        if wrote {
+            row.included=true;
+            summary.rows_affected+=1;
+        }
+    }
+    summary
+}
+
 fn csv_bytes(rows: &[Document], template: &TemplateSpec) -> Result<Vec<u8>,String> {
     let mut writer = csv::WriterBuilder::new().delimiter(template.delimiter)
         .terminator(csv::Terminator::CRLF)
@@ -834,6 +912,43 @@ mod tests {
         assert_eq!(found.len(),1);
         assert_eq!(found[0].fields[1],"Foto-novoe.jpg");
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn excel_clipboard_parse_with_multiple_rows_and_quoted_cells() {
+        let text="Имя\tГруппа\tПримечание\r\nИван\t10\t\"Текст с\tтабуляцией\"\r\nОльга\t11\t\"две\nстроки\"\r\n";
+        let cells=parse_spreadsheet_paste(text).unwrap().unwrap();
+        assert_eq!(cells.len(),3);
+        assert_eq!(cells[1],vec!["Иван","10","Текст с\tтабуляцией"]);
+        assert_eq!(cells[2][2],"две\nстроки");
+        assert!(parse_spreadsheet_paste("одна ячейка").unwrap().is_none());
+    }
+    #[test]
+    fn paste_expands_rows_and_preserves_hidden_column_values() {
+        let mut rows=vec![
+            Document {source:PathBuf::new(),fields:vec!["старое".into(),"секрет".into(),"старое2".into()],
+                included:false},
+        ];
+        let cells=parse_spreadsheet_paste("А\tB\r\nC\tD\r\nE\tF\r\n").unwrap().unwrap();
+        let visible=vec![0,2];
+        let result=apply_spreadsheet_paste(&mut rows,3,&visible,0,0,&cells);
+        assert_eq!(result,PasteSummary {rows_affected:3,created:2,cells_written:6,cells_outside_view:0});
+        assert_eq!(rows.len(),3);
+        assert_eq!(rows[0].fields,vec!["А","секрет","B"]);
+        assert_eq!(rows[1].fields,vec!["C","","D"]);
+        assert!(rows.iter().all(|r|r.included));
+    }
+    #[test]
+    fn paste_from_middle_truncates_overflow_without_damaging_other_fields() {
+        let mut rows=vec![Document {
+            source:PathBuf::new(),fields:vec!["a".into(),"b".into(),"c".into()],
+            included:true,
+        }];
+        let records=parse_spreadsheet_paste("1\t2\t3\r\n4\t5\t6").unwrap().unwrap();
+        let result=apply_spreadsheet_paste(&mut rows,3,&[0,1,2],0,1,&records);
+        assert_eq!(result.cells_written,4);
+        assert_eq!(result.cells_outside_view,2);
+        assert_eq!(rows[0].fields,vec!["a","1","2"]);
+        assert_eq!(rows[1].fields,vec!["","4","5"]);
     }
     #[test]
     fn hidden_column_preferences_survive_project_save_and_load_without_changing_csv() {
