@@ -1,0 +1,83 @@
+name: Radminctl Linux (isolated)
+
+on:
+  push:
+    branches:
+      - build/radminctl-linux-20261030
+    paths:
+      - "tools/radminctl/**"
+      - ".github/workflows/radminctl-linux-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: radminctl-linux-isolated
+  cancel-in-progress: true
+
+jobs:
+  radminctl:
+    name: Build radminctl amd64 GNU and MUSL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+        working-directory: tools/radminctl
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust targets
+        run: |
+          set -euo pipefail
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Build environment
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          (rustc --version && cargo --version && uname -a) | tee ci-logs/environment.txt
+      - name: Run unit tests
+        run: |
+          set -euo pipefail
+          cargo test --offline --all-targets -- --nocapture 2>&1 | tee ci-logs/tests.txt
+      - name: Build GNU and static MUSL
+        run: |
+          set -euo pipefail
+          (cargo build --offline --release && cargo build --offline --release --target x86_64-unknown-linux-musl) 2>&1 | tee ci-logs/build.txt
+      - name: Smoke tests
+        run: |
+          set -euo pipefail
+          {
+            ./target/release/radminctl version
+            ./target/release/radminctl selftest
+            ./target/x86_64-unknown-linux-musl/release/radminctl version
+            ./target/x86_64-unknown-linux-musl/release/radminctl selftest
+            if readelf -l target/x86_64-unknown-linux-musl/release/radminctl | grep -q 'Requesting program interpreter'; then
+              echo "Expected static MUSL binary" >&2
+              exit 1
+            fi
+          } 2>&1 | tee ci-logs/smoke.txt
+      - name: Create Debian package and archives
+        run: |
+          set -euo pipefail
+          bash ci/package-linux.sh 2>&1 | tee ci-logs/package.txt
+          dpkg-deb --info dist/radminctl_*_amd64.deb
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: radminctl-linux-amd64
+          path: tools/radminctl/dist/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: radminctl-build-diagnostics
+          path: tools/radminctl/ci-logs/*
+          if-no-files-found: warn
+          retention-days: 14
