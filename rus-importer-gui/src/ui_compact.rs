@@ -101,8 +101,10 @@ pub(super) struct ImporterApp {
     only_included:bool,
     active_row:Option<usize>,
     dark:bool,
-    full_columns:bool,
     show_editor:bool,
+    show_columns:bool,
+    hidden_columns:HashSet<String>,
+    deleted_row:Option<(usize,Document)>,
     show_bulk:bool,
     bulk_column:usize,
     bulk_value:String,
@@ -125,7 +127,8 @@ impl ImporterApp {
         let folder=exe.parent().unwrap_or(Path::new(".")).to_path_buf();
         let mut app=Self {
             folder,template:None,rows:Vec::new(),filter:String::new(),only_included:false,
-            active_row:None,dark:false,full_columns:false,show_editor:false,
+            active_row:None,dark:false,show_editor:false,
+            show_columns:false,hidden_columns:HashSet::new(),deleted_row:None,
             show_bulk:false,bulk_column:0,bulk_value:String::new(),bulk_checked:false,
             undo_bulk:None,status:String::new(),error:false,dirty:false,
             confirm_rescan:false,pending_folder:None,last_export:None,
@@ -140,6 +143,7 @@ impl ImporterApp {
     fn open_folder(&mut self,folder:PathBuf){
         self.folder=folder.clone();self.template=None;self.rows.clear();self.active_row=None;
         self.undo_bulk=None;self.dirty=false;self.last_export=None;
+        self.hidden_columns.clear();self.deleted_row=None;self.show_columns=false;
         self.template_options.clear();self.pending_project=None;
         let project_path=folder.join(PROJECT_NAME);
         let project=if project_path.is_file() || folder.join(format!("{PROJECT_NAME}.bak")).is_file(){
@@ -165,6 +169,10 @@ impl ImporterApp {
     fn open_template_path(&mut self,path:PathBuf,project:Option<Project>){
         let mut new=match read_template(&path){Ok(t)=>t,Err(e)=>{self.fail(e);return;}};
         if let Some(project)=&project{apply_project_mapping(project,&mut new);}
+        let mut hidden:HashSet<String>=project.as_ref().map(|p|
+            p.hidden_columns.iter().map(|h|h.trim().to_lowercase()).collect()
+        ).unwrap_or_default();
+        hidden.retain(|key|new.headers.iter().any(|h|h.to_lowercase()==*key));
         self.template_options.clear();self.pending_project=None;
         let executable=std::env::current_exe().unwrap_or_default();
         let rows=match project {
@@ -190,6 +198,7 @@ impl ImporterApp {
             },
         };
         self.rows=rows;self.template=Some(new);
+        self.hidden_columns=hidden;self.deleted_row=None;
         self.active_row=None;self.bulk_column=0;self.filter.clear();
         self.undo_bulk=None;self.dirty=false;
         let template=self.template.as_ref().unwrap();
@@ -218,6 +227,7 @@ impl ImporterApp {
                     title_field:previous.title_column.and_then(|i|previous.headers.get(i).cloned()),
                     asset_field:previous.asset_column.and_then(|i|previous.headers.get(i).cloned()),
                     mapping_configured:true,
+                    hidden_columns:self.column_preferences(),
                 })
             } else {None};
             self.open_template_path(path,project);
@@ -234,6 +244,7 @@ impl ImporterApp {
                     title_field:template.title_column.and_then(|i|template.headers.get(i).cloned()),
                     asset_field:template.asset_column.and_then(|i|template.headers.get(i).cloned()),
                     mapping_configured:true,
+                    hidden_columns:self.column_preferences(),
                     headers:template.headers,rows:self.rows.clone(),
                 };
                 apply_project_mapping(&old,&mut new);
@@ -246,16 +257,23 @@ impl ImporterApp {
                 let known:HashSet<PathBuf>=rows.iter().filter(|r|!r.source.as_os_str().is_empty())
                     .map(|r|r.source.clone()).collect();
                 rows.extend(scanned.into_iter().filter(|r|!known.contains(&r.source)));
+                self.hidden_columns.retain(|key|new.headers.iter()
+                    .any(|h|h.to_lowercase()==*key));
                 self.rows=rows;self.template=Some(new);self.active_row=None;
-                self.dirty=true;self.undo_bulk=None;
+                self.dirty=true;self.undo_bulk=None;self.deleted_row=None;
                 self.info("Шаблон перечитан, новые файлы добавлены. Изменения полей сохранены.");
             }
             Err(e)=>self.fail(e),
         }
     }
+    fn column_preferences(&self)->Vec<String>{
+        let mut names=self.hidden_columns.iter().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
     fn persist(&mut self){
         let Some(template)=&self.template else{self.fail("Сначала загрузите CSV-шаблон.");return;};
-        match save_project(&self.folder,&self.rows,template){
+        match save_project(&self.folder,&self.rows,template,&self.column_preferences()){
             Ok(_)=>{self.dirty=false;self.info("Проект сохранён.");}
             Err(e)=>self.fail(e),
         }
@@ -265,7 +283,7 @@ impl ImporterApp {
         match export(&self.folder,&self.rows,template){
             Ok(path)=>{
                 self.last_export=Some(path.clone());
-                match save_project(&self.folder,&self.rows,template){
+                match save_project(&self.folder,&self.rows,template,&self.column_preferences()){
                     Ok(_)=>{self.dirty=false;self.info(format!("Создан: {}",path.display()));}
                     Err(e)=>{self.dirty=true;self.fail(format!("Архив создан, но проект не сохранён: {e}"));}
                 }
@@ -300,10 +318,44 @@ impl ImporterApp {
         self.rows.push(Document{source:PathBuf::new(),fields:vec![String::new();t.headers.len()],included:true});
         self.active_row=Some(self.rows.len()-1);self.dirty=true;self.show_editor=true;
     }
+    fn delete_at(&mut self,index:usize){
+        if index>=self.rows.len(){return;}
+        let removed=self.rows.remove(index);
+        self.deleted_row=Some((index,removed));
+        self.undo_bulk=None; // Past bulk snapshots had different row indices.
+        self.active_row=match self.active_row{
+            Some(i) if i==index=>None,
+            Some(i) if i>index=>Some(i-1),
+            other=>other,
+        };
+        self.dirty=true;
+        self.info(format!("Строка {} удалена. Можно вернуть последнюю удалённую строку.",index+1));
+    }
     fn delete_selected(&mut self){
-        if let Some(idx)=self.active_row{
-            if idx<self.rows.len(){self.rows.remove(idx);self.dirty=true;}
-            self.active_row=None;
+        if let Some(idx)=self.active_row{self.delete_at(idx);}
+    }
+    fn restore_deleted(&mut self){
+        if let Some((idx,row))=self.deleted_row.take(){
+            let location=idx.min(self.rows.len());
+            self.rows.insert(location,row);
+            self.active_row=Some(location);
+            self.undo_bulk=None;
+            self.dirty=true;
+            self.info("Последняя удалённая строка восстановлена.");
+        }
+    }
+    fn short_view(&mut self){
+        let Some(t)=&self.template else{return;};
+        let primary:HashSet<usize>=prime_columns(t).into_iter().collect();
+        self.hidden_columns=t.headers.iter().enumerate()
+            .filter(|(i,_)|!primary.contains(i))
+            .map(|(_,header)|header.to_lowercase()).collect();
+        self.dirty=true;
+    }
+    fn show_all_columns(&mut self){
+        if !self.hidden_columns.is_empty(){
+            self.hidden_columns.clear();
+            self.dirty=true;
         }
     }
     fn add_files(&mut self){
@@ -398,7 +450,7 @@ impl ImporterApp {
     fn toolbar(&mut self,ui:&mut egui::Ui){
         ui.horizontal(|ui|{
             ui.label(RichText::new("Импорт CSV").size(18.0).strong().color(ink(self.dark)));
-            ui.label(RichText::new("v6.3").size(11.0).color(dim(self.dark)));
+            ui.label(RichText::new("v6.4").size(11.0).color(dim(self.dark)));
             ui.separator();
             if ui.add(button("Папка",self.dark)).clicked(){self.choose_folder();}
             if ui.add(button("Шаблон CSV",self.dark)).clicked(){self.choose_template();}
@@ -480,7 +532,10 @@ impl ImporterApp {
             }
             if ui.add_enabled(self.template.is_some(),button("+ Строка",self.dark)).clicked(){self.add_blank_row();}
             if ui.add_enabled(self.template.is_some(),button("+ Файлы",self.dark)).clicked(){self.add_files();}
-            if ui.add_enabled(self.active_row.is_some(),button("Удалить",self.dark)).clicked(){self.delete_selected();}
+            if ui.add_enabled(self.active_row.is_some(),button("Удалить строку",self.dark)).clicked(){self.delete_selected();}
+            if ui.add_enabled(self.deleted_row.is_some(),button("Вернуть удалённую",self.dark)).clicked(){
+                self.restore_deleted();
+            }
             ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{
                 if ui.add(button(if self.show_mapping{"Скрыть назначение"}else{"Колонки файлов"},self.dark)).clicked(){
                     self.show_mapping=!self.show_mapping;
@@ -488,11 +543,39 @@ impl ImporterApp {
                 if ui.add(button(if self.show_editor{"Скрыть поля"}else{"Поля справа"},self.dark)).clicked(){
                     self.show_editor=!self.show_editor;
                 }
-                if ui.add(button(if self.full_columns{"Кратко"}else{"Все столбцы"},self.dark)).clicked(){
-                    self.full_columns=!self.full_columns;
+                if ui.add(button(if self.show_columns{"Скрыть настройки"}else{"Столбцы"},self.dark)).clicked(){
+                    self.show_columns=!self.show_columns;
                 }
             });
         });
+    }
+    fn columns_panel(&mut self,ui:&mut egui::Ui){
+        let Some(template)=&self.template else{return;};
+        let headers=template.headers.clone();
+        ui.horizontal(|ui|{
+            ui.label(RichText::new(format!("Видимо: {} из {}",headers.len()-self.hidden_columns.len(),headers.len()))
+                .color(dim(self.dark)));
+            if ui.add(button("Показать все",self.dark)).clicked(){self.show_all_columns();}
+            if ui.add(button("Основные 5",self.dark)).clicked(){self.short_view();}
+            ui.label(RichText::new("Скрытие влияет только на таблицу, не на CSV.").size(11.0)
+                .color(dim(self.dark)));
+        });
+        let mut updated=false;
+        egui::ScrollArea::vertical().id_salt("visible_columns_scroll")
+            .max_height(145.0).show(ui,|ui|{
+                ui.horizontal_wrapped(|ui|{
+                    for name in &headers{
+                        let key=name.to_lowercase();
+                        let mut visible=!self.hidden_columns.contains(&key);
+                        if ui.checkbox(&mut visible,localized(name)).on_hover_text(name).changed(){
+                            if visible {self.hidden_columns.remove(&key);}
+                            else {self.hidden_columns.insert(key);}
+                            updated=true;
+                        }
+                    }
+                });
+            });
+        if updated{self.dirty=true;}
     }
     fn table(&mut self,ui:&mut egui::Ui){
         let Some(template)=&self.template else{
@@ -502,18 +585,21 @@ impl ImporterApp {
             return;
         };
         let visible=self.filtered();
-        let cols:Vec<usize>=if self.full_columns{(0..template.headers.len()).collect()}
-            else{prime_columns(template)};
+        let cols:Vec<usize>=(0..template.headers.len())
+            .filter(|i|!self.hidden_columns.contains(&template.headers[*i].to_lowercase()))
+            .collect();
         let headers=template.headers.clone();
         let dark=self.dark;
-        let min=80.0+cols.iter().map(|&c|initial_width(&headers[c])).sum::<f32>();
+        let min=110.0+cols.iter().map(|&c|initial_width(&headers[c])).sum::<f32>();
+        let mut to_delete=None;
         egui::ScrollArea::horizontal().id_salt("v6_hscroll").auto_shrink([false,false])
             .show(ui,|ui|{
                 ui.set_min_width(min.max(ui.available_width()));
                 let mut table=TableBuilder::new(ui)
-                    .id_salt(if self.full_columns{"v6_full"}else{"v6_basic"})
+                    .id_salt(format!("v6_visible_{cols:?}"))
                     .striped(true).resizable(true).auto_shrink([false,false])
-                    .column(Column::exact(28.0)).column(Column::exact(36.0));
+                    .column(Column::exact(28.0)).column(Column::exact(36.0))
+                    .column(Column::exact(36.0));
                 for &c in &cols{
                     table=table.column(Column::initial(initial_width(&headers[c]))
                         .at_least(65.0).at_most(1200.0).resizable(true).clip(true));
@@ -521,6 +607,7 @@ impl ImporterApp {
                 table.header(25.0,|mut header|{
                     header.col(|ui|{ui.label("В");});
                     header.col(|ui|{ui.label("#");});
+                    header.col(|ui|{ui.label("×").on_hover_text("Удалить строку");});
                     for &c in &cols{
                         header.col(|ui|{
                             ui.label(RichText::new(localized(&headers[c])).strong().color(ink(dark)))
@@ -535,8 +622,14 @@ impl ImporterApp {
                             if ui.checkbox(&mut doc.included,"").changed(){self.dirty=true;}
                         });
                         row.col(|ui|{
-                            if ui.selectable_label(self.active_row==Some(idx),(idx+1).to_string()).clicked(){
+                            if ui.selectable_label(self.active_row==Some(idx),(idx+1).to_string())
+                                .on_hover_text("Выбрать строку").clicked(){
                                 self.active_row=Some(idx);self.show_editor=true;
+                            }
+                        });
+                        row.col(|ui|{
+                            if ui.small_button("×").on_hover_text("Удалить эту строку").clicked(){
+                                to_delete=Some(idx);
                             }
                         });
                         for &c in &cols{
@@ -552,6 +645,7 @@ impl ImporterApp {
                     });
                 });
             });
+        if let Some(index)=to_delete{self.delete_at(index);}
     }
     fn inspector(&mut self,ui:&mut egui::Ui){
         ui.horizontal(|ui|{
@@ -705,6 +799,11 @@ impl eframe::App for ImporterApp {
         egui::TopBottomPanel::top("v6_bulk")
             .frame(Frame::new().fill(surface(self.dark)).inner_margin(Margin::symmetric(12,3)))
             .show(ctx,|ui|self.bulk_bar(ui));
+        if self.show_columns{
+            egui::TopBottomPanel::top("v6_column_visibility")
+                .frame(Frame::new().fill(surface(self.dark)).inner_margin(Margin::symmetric(12,5)))
+                .show(ctx,|ui|self.columns_panel(ui));
+        }
         if self.show_mapping{
             egui::TopBottomPanel::top("v6_mapping")
                 .frame(Frame::new().fill(surface(self.dark)).inner_margin(Margin::symmetric(12,3)))
