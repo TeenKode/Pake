@@ -105,6 +105,7 @@ pub(super) struct ImporterApp {
     show_columns:bool,
     hidden_columns:HashSet<String>,
     deleted_row:Option<(usize,Document)>,
+    focused_cell:Option<(usize,usize,egui::Id)>,
     show_bulk:bool,
     bulk_column:usize,
     bulk_value:String,
@@ -129,6 +130,7 @@ impl ImporterApp {
             folder,template:None,rows:Vec::new(),filter:String::new(),only_included:false,
             active_row:None,dark:false,show_editor:false,
             show_columns:false,hidden_columns:HashSet::new(),deleted_row:None,
+            focused_cell:None,
             show_bulk:false,bulk_column:0,bulk_value:String::new(),bulk_checked:false,
             undo_bulk:None,status:String::new(),error:false,dirty:false,
             confirm_rescan:false,pending_folder:None,last_export:None,
@@ -144,6 +146,7 @@ impl ImporterApp {
         self.folder=folder.clone();self.template=None;self.rows.clear();self.active_row=None;
         self.undo_bulk=None;self.dirty=false;self.last_export=None;
         self.hidden_columns.clear();self.deleted_row=None;self.show_columns=false;
+        self.focused_cell=None;
         self.template_options.clear();self.pending_project=None;
         let project_path=folder.join(PROJECT_NAME);
         let project=if project_path.is_file() || folder.join(format!("{PROJECT_NAME}.bak")).is_file(){
@@ -199,6 +202,7 @@ impl ImporterApp {
         };
         self.rows=rows;self.template=Some(new);
         self.hidden_columns=hidden;self.deleted_row=None;
+        self.focused_cell=None;
         self.active_row=None;self.bulk_column=0;self.filter.clear();
         self.undo_bulk=None;self.dirty=false;
         let template=self.template.as_ref().unwrap();
@@ -317,12 +321,14 @@ impl ImporterApp {
         let Some(t)=&self.template else{return;};
         self.rows.push(Document{source:PathBuf::new(),fields:vec![String::new();t.headers.len()],included:true});
         self.active_row=Some(self.rows.len()-1);self.dirty=true;self.show_editor=true;
+        self.focused_cell=None;
     }
     fn delete_at(&mut self,index:usize){
         if index>=self.rows.len(){return;}
         let removed=self.rows.remove(index);
         self.deleted_row=Some((index,removed));
         self.undo_bulk=None; // Past bulk snapshots had different row indices.
+        self.focused_cell=None;
         self.active_row=match self.active_row{
             Some(i) if i==index=>None,
             Some(i) if i>index=>Some(i-1),
@@ -577,6 +583,47 @@ impl ImporterApp {
             });
         if updated{self.dirty=true;}
     }
+    /// Consume a multi-cell clipboard event before singleline TextEdit widgets
+    /// can paste a whole Excel range into one CSV field.
+    fn spreadsheet_paste(&mut self,ctx:&egui::Context){
+        let Some((row,column,id))=self.focused_cell else{return;};
+        if !ctx.memory(|m|m.has_focus(id)){return;}
+        let clipboard=ctx.input(|i|i.events.iter().find_map(|e|{
+            if let egui::Event::Paste(value)=e{Some(value.clone())}else{None}
+        }));
+        let Some(clipboard)=clipboard else{return;};
+        let parsed=match parse_spreadsheet_paste(&clipboard){
+            Ok(Some(grid))=>Ok(grid),
+            Ok(None)=>return, // A regular single value is handled by the editor.
+            Err(error)=>Err(error),
+        };
+        ctx.input_mut(|i|i.events.retain(|e|!matches!(e,egui::Event::Paste(_))));
+        let grid=match parsed{
+            Ok(grid)=>grid,
+            Err(error)=>{self.fail(error);return;}
+        };
+        let Some(template)=self.template.as_ref() else{return;};
+        let visible=(0..template.headers.len())
+            .filter(|&c|!self.hidden_columns.contains(&template.headers[c].to_lowercase()))
+            .collect::<Vec<_>>();
+        let result=apply_spreadsheet_paste(
+            &mut self.rows,template.headers.len(),&visible,row,column,&grid
+        );
+        if result.cells_written==0{
+            self.fail("Не удалось вставить таблицу: начальная колонка скрыта или недоступна.");
+            return;
+        }
+        self.active_row=Some(row);
+        self.undo_bulk=None;
+        self.dirty=true;
+        self.info(format!(
+            "Вставлено ячеек: {} · Строк затронуто: {} · Новых строк: {}{}",
+            result.cells_written,result.rows_affected,result.created,
+            if result.cells_outside_view>0 {
+                format!(" · За пределами видимых колонок: {}",result.cells_outside_view)
+            } else {String::new()}
+        ));
+    }
     fn table(&mut self,ui:&mut egui::Ui){
         let Some(template)=&self.template else{
             ui.add_space(18.0);
@@ -584,6 +631,7 @@ impl ImporterApp {
             ui.label("Выберите любой CSV-шаблон. Названия колонок могут быть произвольными.");
             return;
         };
+        self.focused_cell=None;
         let visible=self.filtered();
         let cols:Vec<usize>=(0..template.headers.len())
             .filter(|i|!self.hidden_columns.contains(&template.headers[*i].to_lowercase()))
@@ -635,9 +683,12 @@ impl ImporterApp {
                         for &c in &cols{
                             row.col(|ui|{
                                 if let Some(value)=doc.fields.get_mut(c){
-                                    if ui.add(TextEdit::singleline(value).desired_width(f32::INFINITY)
-                                        .clip_text(true).margin(egui::vec2(3.0,2.0))).changed(){
-                                        self.dirty=true;
+                                    let response=ui.add(TextEdit::singleline(value)
+                                        .desired_width(f32::INFINITY)
+                                        .clip_text(true).margin(egui::vec2(3.0,2.0)));
+                                    if response.changed(){self.dirty=true;}
+                                    if response.has_focus(){
+                                        self.focused_cell=Some((idx,c,response.id));
                                     }
                                 }
                             });
@@ -724,7 +775,7 @@ impl ImporterApp {
             let color=if self.error{BAD}else{if self.dark{GOOD}else{Color32::from_rgb(19,119,91)}};
             ui.label(RichText::new(&self.status).size(11.0).color(color));
             ui.with_layout(egui::Layout::right_to_left(Align::Center),|ui|{
-                ui.label(RichText::new("CSV без BOM · Ctrl+S сохранить · Ctrl+E экспорт")
+                ui.label(RichText::new("Ctrl+V из Excel · Ctrl+S сохранить · Ctrl+E экспорт")
                     .size(11.0).color(dim(self.dark)));
             });
         });
@@ -789,6 +840,7 @@ impl ImporterApp {
 }
 impl eframe::App for ImporterApp {
     fn update(&mut self,ctx:&egui::Context,_frame:&mut eframe::Frame){
+        self.spreadsheet_paste(ctx);
         if ctx.input(|i|i.modifiers.ctrl && i.key_pressed(egui::Key::S)){self.persist();}
         if ctx.input(|i|i.modifiers.ctrl && i.key_pressed(egui::Key::E)){self.generate();}
         if ctx.input(|i|i.modifiers.ctrl && i.key_pressed(egui::Key::O)){self.choose_folder();}
