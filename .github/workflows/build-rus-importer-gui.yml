@@ -13,6 +13,7 @@ on:
       - build/rus-importer-v6-1-safe-filenames-20261028
       - release/rus-document-importer-v6-2-20261028
       - release/rus-document-importer-v6-3-staff-template-20261028
+      - release/rus-document-importer-v6-4-row-actions-columns-20261030
   workflow_dispatch:
 
 jobs:
@@ -80,7 +81,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = '6.3.0'
+          $version = '6.4.0'
           $staging = Join-Path $env:RUNNER_TEMP ('RusDocumentImporter-' + $version)
           $exampleDir = Join-Path $staging 'examples'
           New-Item -ItemType Directory -Force -Path $exampleDir | Out-Null
@@ -98,14 +99,14 @@ jobs:
       - name: Upload publication-ready ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: RusDocumentImporter_6_3_GenericTemplates_Portable
+          name: RusDocumentImporter_6_4_RowColumns_Portable
           path: |
-            RusDocumentImporter_6.3.0_Windows_x64_portable.zip
+            RusDocumentImporter_6.4.0_Windows_x64_portable.zip
             SHA256SUMS.txt
           if-no-files-found: error
       - name: Upload GUI EXE
         uses: actions/upload-artifact@v4
         with:
-          name: RusDocumentImporter_GUI_v6_3_Windows_x64
+          name: RusDocumentImporter_GUI_v6_4_Windows_x64
           path: rus-importer-gui/target/release/rus_document_importer_gui.exe
           if-no-files-found: error
