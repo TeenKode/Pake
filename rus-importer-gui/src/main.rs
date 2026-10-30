@@ -46,6 +46,9 @@ struct Project {
     asset_field: Option<String>,
     #[serde(default)]
     mapping_configured: bool,
+    // Column visibility is a view preference, never part of exported CSV data.
+    #[serde(default)]
+    hidden_columns: Vec<String>,
 }
 
 fn column_index(headers: &[String], name: &str) -> Option<usize> {
@@ -503,7 +506,7 @@ fn relink_document_sources(rows: &mut [Document], folder: &Path) {
         }
     }
 }
-fn save_project(folder: &Path, rows: &[Document], template: &TemplateSpec) -> Result<PathBuf,String> {
+fn save_project(folder: &Path, rows: &[Document], template: &TemplateSpec, hidden_columns: &[String]) -> Result<PathBuf,String> {
     let mut rows = rows.to_vec();
     for row in &mut rows {
         if let Ok(relative) = row.source.strip_prefix(folder) {
@@ -518,6 +521,7 @@ fn save_project(folder: &Path, rows: &[Document], template: &TemplateSpec) -> Re
         title_field:template.title_column.and_then(|i|template.headers.get(i).cloned()),
         asset_field:template.asset_column.and_then(|i|template.headers.get(i).cloned()),
         mapping_configured:true,
+        hidden_columns:hidden_columns.to_vec(),
     };
     let bytes = serde_json::to_vec_pretty(&project).map_err(|e|e.to_string())?;
     let path = folder.join(PROJECT_NAME);
@@ -645,6 +649,7 @@ mod tests {
             }],
             title_field:Some("Name".into()),asset_field:Some("File".into()),
             mapping_configured:true,
+            hidden_columns:vec![],
         };
         let template=TemplateSpec {
             path:PathBuf::from("new.csv"),
@@ -730,7 +735,7 @@ mod tests {
         let source = original.join(filename);
         fs::write(&source,b"PDF").unwrap();
         let rows = scan(&original,&original.join("app.exe"),&t).unwrap();
-        save_project(&original,&rows,&t).unwrap();
+        save_project(&original,&rows,&t,&[]).unwrap();
         let saved = fs::read_to_string(original.join(PROJECT_NAME)).unwrap();
         assert!(!saved.contains(&original.display().to_string()));
         fs::copy(&source,destination.join(filename)).unwrap();
@@ -753,9 +758,9 @@ mod tests {
         let source=folder.join("Документ.pdf");
         fs::write(&source,b"source").unwrap();
         let mut rows=scan(&folder,&folder.join("app.exe"),&template).unwrap();
-        save_project(&folder,&rows,&template).unwrap();
+        save_project(&folder,&rows,&template,&[]).unwrap();
         rows[0].fields[2] = "Изменённое значение".into();
-        save_project(&folder,&rows,&template).unwrap();
+        save_project(&folder,&rows,&template,&[]).unwrap();
         let restored=load_project(&folder.join(PROJECT_NAME)).unwrap();
         assert_eq!(restored.rows[0].fields[2],"Изменённое значение");
         fs::remove_dir_all(folder).unwrap();
@@ -829,6 +834,36 @@ mod tests {
         assert_eq!(found.len(),1);
         assert_eq!(found[0].fields[1],"Foto-novoe.jpg");
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn hidden_column_preferences_survive_project_save_and_load_without_changing_csv() {
+        let folder=sandbox("hidden_columns");
+        let path=folder.join("template_38_columns.csv");
+        let header=(0..38).map(|i|format!("CustomCol{i}")).collect::<Vec<_>>();
+        fs::write(&path,format!("{}\n",header.join(";"))).unwrap();
+        let template=read_template(&path).unwrap();
+        let row=Document {
+            source:PathBuf::new(),included:true,
+            fields:(0..38).map(|i|format!("value_{i}")).collect(),
+        };
+        let hidden=vec!["CustomCol2".to_owned(),"CustomCol17".to_owned()];
+        save_project(&folder,&[row.clone()],&template,&hidden).unwrap();
+        let reopened=load_project(&folder.join(PROJECT_NAME)).unwrap();
+        assert_eq!(reopened.hidden_columns,hidden);
+        let content=String::from_utf8(csv_bytes(&reopened.rows,&template).unwrap()).unwrap();
+        assert!(content.starts_with(&format!("{}\r\n",header.join(";"))));
+        assert!(content.contains("value_2"));
+        assert!(content.contains("value_17"));
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn legacy_project_without_column_visibility_still_loads() {
+        let folder=sandbox("legacy_visibility");
+        let project_path=folder.join(PROJECT_NAME);
+        fs::write(&project_path,r#"{"version":2,"folder":".","headers":["A","B"],"rows":[]}"#).unwrap();
+        let p=load_project(&project_path).unwrap();
+        assert!(p.hidden_columns.is_empty());
+        fs::remove_dir_all(folder).unwrap();
     }
     #[test]
     fn quotes_only_fields_that_require_it() {
