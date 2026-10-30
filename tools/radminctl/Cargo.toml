@@ -1,0 +1,15 @@
+[package]
+name = "radminctl"
+version = "0.3.2"
+edition = "2021"
+description = "Linux CLI and diagnostics for the Radmin VPN Wine/TAP compatibility backend"
+license = "MIT"
+
+[[bin]]
+name = "radminctl"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
